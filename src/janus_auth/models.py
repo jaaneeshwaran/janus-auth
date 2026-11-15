@@ -1,8 +1,8 @@
 """Strict Pydantic v2 domain models for Janus-Auth.
 
-Every model forbids unknown fields (``extra="forbid"``) so that malformed manifests,
-plans, traces, and verdicts fail closed instead of silently dropping security-relevant
-data.
+Every model forbids unknown fields (``extra="forbid"``) and uses strict scalar validation
+(``strict=True``) so that malformed manifests, plans, traces, and verdicts fail closed instead
+of silently coercing security-relevant data.
 
 Signed scope manifests
 ----------------------
@@ -42,9 +42,9 @@ BranchLabel = Literal["A", "B"]
 
 
 class StrictModel(BaseModel):
-    """Base model: unknown fields are rejected."""
+    """Base model: unknown fields are rejected and scalar values are strict."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
 
 class Decision(StrEnum):
@@ -271,20 +271,20 @@ class ScopeManifest(StrictModel):
     approved: bool = False
     approver: str | None = None
     approved_at: datetime | None = None
-    policy_sha256: str
-    manifest_sha256: str | None = None
+    policy_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    manifest_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     allowed_hosts: list[str] = Field(
         default_factory=lambda: ["127.0.0.1", "localhost", "testserver"]
     )
-    max_requests: int = 500
-    rate_limit_rps: float = 50.0
+    max_requests: int = Field(default=500, gt=0)
+    rate_limit_rps: float = Field(default=50.0, gt=0.0)
     allow_destructive: bool = False
     reset_endpoint: str | None = None
     transition_endpoints: list[TransitionEndpoint] = Field(default_factory=list)
     principal_aliases: dict[str, str] = Field(default_factory=dict)
     operations: dict[str, OperationMap] = Field(default_factory=dict)
     expires_at: datetime | None = None
-    signature: str | None = None
+    signature: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     def canonical_body_bytes(self, *, include_manifest_sha256: bool = True) -> bytes:
         """Return the canonical UTF-8 JSON body used for hashing and signing.
@@ -329,10 +329,23 @@ class ScopeManifest(StrictModel):
         return self
 
     def verify_integrity(self) -> bool:
-        """Return ``True`` when the stored ``manifest_sha256`` matches the body."""
+        """Return ``True`` when the stored ``manifest_sha256`` matches the body.
+
+        Malformed (non-hex, non-ASCII, or non-string) stored digests return ``False`` rather
+        than raising; this method is called on untrusted manifest input.
+        """
         if self.manifest_sha256 is None:
             return False
-        return hmac.compare_digest(self.manifest_sha256, self.compute_manifest_sha256())
+        if not isinstance(self.manifest_sha256, str) or len(self.manifest_sha256) != 64:
+            return False
+        expected = hashlib.sha256(
+            self.canonical_body_bytes(include_manifest_sha256=False)
+        ).digest()
+        try:
+            actual = bytes.fromhex(self.manifest_sha256)
+        except (TypeError, ValueError):
+            return False
+        return hmac.compare_digest(expected, actual)
 
     def is_expired(self, *, now: datetime | None = None) -> bool:
         """Return ``True`` when ``expires_at`` has been reached."""
@@ -347,8 +360,14 @@ class ScopeManifest(StrictModel):
         return expires_at <= current
 
     def verify_signature(self, secret: str | None = None) -> bool:
-        """Verify integrity, HMAC, and expiry.  Unsigned or expired manifests fail."""
+        """Verify integrity, HMAC, and expiry.  Unsigned, malformed, or expired manifests fail.
+
+        HMAC comparison is performed over raw digest bytes so a hand-edited non-ASCII
+        ``signature`` can never raise ``TypeError`` out of this boolean contract.
+        """
         if self.signature is None or self.manifest_sha256 is None:
+            return False
+        if not isinstance(self.signature, str) or len(self.signature) != 64:
             return False
         if self.is_expired():
             return False
@@ -359,8 +378,12 @@ class ScopeManifest(StrictModel):
             key,
             self.canonical_body_bytes(include_manifest_sha256=True),
             hashlib.sha256,
-        ).hexdigest()
-        return hmac.compare_digest(expected, self.signature)
+        ).digest()
+        try:
+            actual = bytes.fromhex(self.signature)
+        except (TypeError, ValueError):
+            return False
+        return hmac.compare_digest(expected, actual)
 
 
 class MappingProposal(StrictModel):
@@ -372,7 +395,7 @@ class MappingProposal(StrictModel):
     """
 
     approved: bool = False
-    policy_sha256: str
+    policy_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     proposed_operations: dict[str, OperationMap]
     notes: list[str]
     generated_at: datetime

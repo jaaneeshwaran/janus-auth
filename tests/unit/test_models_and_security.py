@@ -213,6 +213,54 @@ def test_models_support_state_rejects_unknown_action() -> None:
         make_support_state(action="delete_everything")
 
 
+def test_models_strict_mode_rejects_raw_scalars() -> None:
+    with pytest.raises(ValidationError):
+        SupportState(
+            principal_id="bea",
+            resource_id="doc_101",
+            action="protected_read",  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValidationError):
+        ScopeManifest(policy_sha256=POLICY_SHA, max_requests="500")  # type: ignore[arg-type]
+    with pytest.raises(ValidationError):
+        ScopeManifest(policy_sha256=POLICY_SHA, approved="true")  # type: ignore[arg-type]
+
+    state = SupportState(
+        principal_id="bea",
+        resource_id="doc_101",
+        action=ProbeType.PROTECTED_READ,
+    )
+    assert state.action is ProbeType.PROTECTED_READ
+
+
+def test_models_nested_unknown_keys_rejected() -> None:
+    with pytest.raises(ValidationError):
+        ScopeManifest.model_validate(
+            {
+                "policy_sha256": POLICY_SHA,
+                "transition_endpoints": [
+                    {
+                        "family": TransitionFamily.DIRECT_SHARE_REVOKE,
+                        "method": "DELETE",
+                        "path_template": "/api/v1/documents/{doc_id}/shares/{user_id}",
+                        "unexpected": True,
+                    }
+                ],
+            }
+        )
+
+    payload = {
+        "plan_id": "plan-001",
+        "synthesized": {**make_pair_plan().model_dump(), "unexpected": True},
+        "branch_a_steps": [],
+        "branch_b_steps": [],
+        "canary": "JANUS_CANARY_deadbeef",
+        "probe_principal": "bea",
+    }
+    with pytest.raises(ValidationError):
+        CompiledTwinPlan.model_validate(payload)
+
+
 def test_models_counterfactual_pair_plan_hamming_bounds() -> None:
     assert make_pair_plan(hamming_distance=1).hamming_distance == 1
     assert make_pair_plan(hamming_distance=2).hamming_distance == 2
@@ -324,13 +372,20 @@ def test_models_mapping_proposal_is_unapproved_by_default() -> None:
         generated_at=datetime.now(UTC),
     )
     assert proposal.approved is False
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="always unapproved"):
         MappingProposal(
             policy_sha256=POLICY_SHA,
             proposed_operations={},
             notes=[],
             generated_at=datetime.now(UTC),
-            approved="yes",  # type: ignore[arg-type]
+            approved=True,
+        )
+    with pytest.raises(ValidationError):
+        MappingProposal(
+            policy_sha256="not-a-hash",
+            proposed_operations={},
+            notes=[],
+            generated_at=datetime.now(UTC),
         )
 
 
@@ -358,7 +413,6 @@ def test_manifest_canonical_body_is_sorted_compact_utf8() -> None:
         parsed, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     ).encode("utf-8")
     assert body == expected
-    assert b" " not in body
     assert "señor-approver".encode() in body
     assert b'"signature"' not in body
 
@@ -454,6 +508,49 @@ def test_manifest_bad_signature_and_wrong_secret_fail_verification() -> None:
 
     unsigned = signed.model_copy(update={"signature": None})
     assert unsigned.verify_signature(SECRET) is False
+
+
+def test_manifest_constrains_digest_fields_at_parse() -> None:
+    base = make_manifest().model_dump(mode="json")
+    malformed_values = [
+        ("policy_sha256", "0" * 63),
+        ("policy_sha256", "é" * 64),
+        ("manifest_sha256", "A" * 64),
+        ("manifest_sha256", "zz" * 32),
+        ("signature", "not-a-digest"),
+        ("signature", "é" * 64),
+    ]
+    for field, value in malformed_values:
+        with pytest.raises(ValidationError):
+            ScopeManifest.model_validate_json(json.dumps({**base, field: value}))
+
+    valid = ScopeManifest.model_validate_json(json.dumps({**base, "policy_sha256": "a" * 64}))
+    assert valid.policy_sha256 == "a" * 64
+
+
+def test_manifest_malformed_digests_return_false_instead_of_raising() -> None:
+    signed = make_manifest().sign(SECRET)
+    for field in ("signature", "manifest_sha256"):
+        for value in ("é" * 64, "zz" * 32, 12345):
+            malformed = signed.model_copy(update={field: value})
+            assert malformed.verify_signature(SECRET) is False, (field, value)
+
+    assert signed.model_copy(update={"signature": "é" * 64}).verify_integrity() is True
+    assert signed.model_copy(update={"manifest_sha256": "é" * 64}).verify_integrity() is False
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("max_requests", 0),
+        ("max_requests", -1),
+        ("rate_limit_rps", 0.0),
+        ("rate_limit_rps", -1.0),
+    ],
+)
+def test_manifest_rejects_nonpositive_limits(field: str, value: int | float) -> None:
+    with pytest.raises(ValidationError):
+        make_manifest(**{field: value})
 
 
 def test_manifest_missing_hash_fails_verification() -> None:

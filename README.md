@@ -8,8 +8,9 @@ branches against an authorized target, and adjudicates the outcome with a **4-di
 effect matrix**. It proves two things at once: that a revoked grant leaves **no residual access**, and
 that the revocation did **not** break a legitimate surviving grant.
 
-> **Status:** MVP under construction (Phases 0–4). `PROJECT_SPEC.md` is the binding specification;
-> `IMPLEMENTATION_PLAN.md` is the normalized execution plan.
+> **Status:** MVP complete (Phases 0–4). `PROJECT_SPEC.md` is the binding specification;
+> `IMPLEMENTATION_PLAN.md` is the normalized execution plan. The Phase 5 landing page lives in
+> `site/`.
 
 ---
 

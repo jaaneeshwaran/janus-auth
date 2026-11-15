@@ -219,6 +219,14 @@ class TraceStore:
             return None
         return self._decode_row(row)
 
+    def fetch_run_ids(self) -> list[str]:
+        """Return every stored run id in start order (oldest first)."""
+        connection = self._require_connection()
+        rows = connection.execute(
+            "SELECT run_id FROM runs ORDER BY started_at, run_id"
+        ).fetchall()
+        return [str(_row_value(row, "run_id")) for row in rows]
+
     def fetch_verdicts(self, run_id: str) -> list[dict[str, object]]:
         """Return all decrypted verdicts for ``run_id`` in insertion order."""
         connection = self._require_connection()

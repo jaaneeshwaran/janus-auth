@@ -186,3 +186,37 @@ def test_run_rejects_an_unsigned_manifest(tmp_path: Path) -> None:
         ],
     )
     assert result.exit_code == 1
+
+
+def test_run_rejects_a_signed_but_unapproved_manifest(tmp_path: Path) -> None:
+    approved = _approved_manifest(tmp_path)
+    plans = _compile(tmp_path, approved)
+    signed_draft = load_manifest(MANIFEST_PATH)
+    signed_draft.sign(TEST_SIGNING_SECRET)
+    draft_path = tmp_path / "signed_draft.yaml"
+    draft_path.write_text(
+        yaml.safe_dump(signed_draft.model_dump(mode="json"), sort_keys=False),
+        encoding="utf-8",
+    )
+    result = _runner().invoke(
+        cli_app,
+        [
+            "run",
+            "--plans",
+            str(plans),
+            "--target-url",
+            "http://testserver",
+            "--manifest",
+            str(draft_path),
+            "--mode",
+            "clean",
+            "--sarif-out",
+            str(tmp_path / "out.sarif.json"),
+            "--report-out",
+            str(tmp_path / "out.json"),
+            "--witness-dir",
+            str(tmp_path / "witnesses"),
+        ],
+    )
+    assert result.exit_code == 1
+    assert "approved" in result.output.lower()

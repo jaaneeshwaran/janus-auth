@@ -49,6 +49,8 @@ class BaselineMethod(Protocol):
         self, plan: CompiledTwinPlan, evidence: PairedExecutionEvidence
     ) -> bool: ...
 
+    def covers(self, evidence: PairedExecutionEvidence) -> bool: ...
+
 
 class BenchmarkBudgetError(RuntimeError):
     """Raised when evidence collection exceeds the declared request budget."""
@@ -152,6 +154,7 @@ class CaseResult:
     category: str
     expected_detection: bool
     detections: dict[str, bool]
+    coverage: dict[str, bool]
     branch_a_steps: int
     branch_b_steps: int
 
@@ -202,6 +205,7 @@ class BenchmarkReport:
                     "category": case.category,
                     "expected_detection": case.expected_detection,
                     "detections": case.detections,
+                    "coverage": case.coverage,
                     "branch_a_steps": case.branch_a_steps,
                     "branch_b_steps": case.branch_b_steps,
                 }
@@ -319,6 +323,10 @@ class BenchmarkEvaluator:
                             method.name: method.evaluate(plan, evidence)
                             for method in self._methods
                         },
+                        coverage={
+                            method.name: method.covers(evidence)
+                            for method in self._methods
+                        },
                         branch_a_steps=len(evidence.branch_a.steps),
                         branch_b_steps=len(evidence.branch_b.steps),
                     )
@@ -366,7 +374,10 @@ class BenchmarkEvaluator:
             access_regression_detection_rate=float(
                 regression.detections[method.name]
             ),
-            decision_coverage=1.0 if method.covers_both_branches else 0.5,
+            decision_coverage=sum(
+                1 for case in cases if case.coverage[method.name]
+            )
+            / len(cases),
             selective_error=errors / len(cases),
             average_witness_length=fmean(
                 case.witness_length(method.name, method.covers_both_branches)

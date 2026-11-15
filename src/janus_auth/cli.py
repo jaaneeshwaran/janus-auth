@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Final, NoReturn
 
@@ -18,7 +17,12 @@ from rich.console import Console
 from rich.table import Table
 
 from janus_auth.benchmark import BenchmarkEvaluator, BenchmarkReport
-from janus_auth.compiler import HeuristicOperationMapper, WorkflowCompiler, load_manifest
+from janus_auth.compiler import (
+    HeuristicOperationMapper,
+    WorkflowCompiler,
+    Z3Synthesizer,
+    load_manifest,
+)
 from janus_auth.config import Settings
 from janus_auth.models import (
     AdjudicationReport,
@@ -29,7 +33,7 @@ from janus_auth.models import (
     VerdictKind,
 )
 from janus_auth.oracle import CedarOracle
-from janus_auth.oracle.adjudicator import adjudicate
+from janus_auth.oracle.adjudicator import Adjudicator, adjudicate
 from janus_auth.reporting import build_sarif, write_replay_witness, write_sarif
 from janus_auth.runner import (
     CounterfactualExecutor,
@@ -37,6 +41,7 @@ from janus_auth.runner import (
     PairPreservingMinimizer,
 )
 from janus_auth.security.gatekeeper import SafetyGatekeeper, ScopeViolationError
+from janus_auth.security.store import TraceStore
 from janus_auth.targets.docvault_app import ALL_MODES, create_app
 
 app = typer.Typer(
@@ -101,10 +106,12 @@ def _compile(
     policy_text = _load_policy(policy_path)
     policy_sha = hashlib.sha256(policy_text.encode("utf-8")).hexdigest()
     manifest = load_manifest(manifest_path)
+    oracle = CedarOracle.from_file(policy_path)
     compiler = WorkflowCompiler(
-        CedarOracle.from_file(policy_path),
+        oracle,
         signing_secret=settings.signing_secret,
         policy_sha256=policy_sha,
+        synthesizer=Z3Synthesizer(oracle, timeout_ms=settings.z3_timeout_ms),
     )
     return compiler.compile_suite(manifest)
 
@@ -131,7 +138,7 @@ def _client_for(target_url: str) -> httpx.Client:
     if target_url.rstrip("/") in {"http://testserver", "testserver"}:
         return TestClient(create_app(), follow_redirects=False)
     return httpx.Client(
-        base_url=target_url, follow_redirects=False, timeout=10.0
+        base_url=target_url, follow_redirects=False, timeout=5.0
     )
 
 
@@ -143,14 +150,25 @@ def _execute_mode(
     mode: str,
     budget: int,
     requests_so_far: int,
+    trace_store: TraceStore | None = None,
+    run_id: str | None = None,
 ) -> tuple[list[tuple[CompiledTwinPlan, AdjudicationReport]], int]:
     reports: list[tuple[CompiledTwinPlan, AdjudicationReport]] = []
     used = requests_so_far
+    adjudicator = (
+        Adjudicator(trace_store, run_id=run_id)
+        if trace_store is not None and run_id is not None
+        else None
+    )
     for plan in plans:
         gatekeeper = SafetyGatekeeper(manifest, secret=settings.signing_secret)
         executor = CounterfactualExecutor(client, gatekeeper, mode=mode)
         evidence = executor.execute(plan)
-        report = adjudicate(plan, evidence)
+        report = (
+            adjudicator.adjudicate(plan, evidence)
+            if adjudicator is not None
+            else adjudicate(plan, evidence)
+        )
         report = report.model_copy(
             update={
                 "evidence": {**report.evidence, "mode": mode},
@@ -198,7 +216,8 @@ def _write_artifacts(
         encoding="utf-8",
     )
     if witness_dir.exists():
-        shutil.rmtree(witness_dir)
+        for stale in witness_dir.rglob("witness_*.py"):
+            stale.unlink()
     witness_dir.mkdir(parents=True, exist_ok=True)
     for plan, report in findings:
         mode = str(report.evidence.get("mode", "unknown"))
@@ -223,6 +242,27 @@ def _print_verdict_table(
             report.subtype.value,
         )
     console.print(table)
+
+
+def _trace_run_id(mode: str, started_at: datetime) -> str:
+    return f"run-{mode}-{started_at.strftime('%Y%m%dT%H%M%S%f')}"
+
+
+def _record_trace_run(
+    store: TraceStore,
+    manifest: ScopeManifest,
+    run_id: str,
+    target_url: str,
+    requests_used: int,
+) -> None:
+    store.record_run(
+        run_id,
+        datetime.now(UTC),
+        manifest.policy_sha256,
+        manifest.manifest_sha256,
+        target_url,
+        total_requests=requests_used,
+    )
 
 
 def _noise_steps() -> list[ApiStep]:
@@ -295,6 +335,31 @@ def _minimize_demo_witness(
     }
 
 
+def _print_benchmark_table(report: BenchmarkReport) -> None:
+    table = Table(title="Janus-Auth benchmark")
+    for column in (
+        "Method",
+        "Recall",
+        "FP controls",
+        "Silent write",
+        "Regression",
+        "Coverage",
+        "Selective error",
+    ):
+        table.add_column(column)
+    for metrics in report.methods.values():
+        table.add_row(
+            metrics.method,
+            f"{metrics.known_defect_recall:.2f}",
+            f"{metrics.false_positive_rate_on_controls:.2f}",
+            f"{metrics.silent_write_detection_rate:.2f}",
+            f"{metrics.access_regression_detection_rate:.2f}",
+            f"{metrics.decision_coverage:.2f}",
+            f"{metrics.selective_error:.2f}",
+        )
+    console.print(table)
+
+
 @app.command()
 def validate(
     policy: Annotated[Path, typer.Option()] = DEFAULT_POLICY,
@@ -349,6 +414,7 @@ def approve_manifest(
     manifest: Annotated[Path, typer.Option()] = DEFAULT_MANIFEST,
     policy: Annotated[Path, typer.Option()] = DEFAULT_POLICY,
     approver: Annotated[str, typer.Option()] = "sec-lead@example.org",
+    expires_in_days: Annotated[int, typer.Option(min=1)] = 7,
 ) -> None:
     """Record a human approval and HMAC-sign the manifest in place."""
     try:
@@ -362,6 +428,7 @@ def approve_manifest(
         scope.approved = True
         scope.approver = approver
         scope.approved_at = datetime.now(UTC)
+        scope.expires_at = datetime.now(UTC) + timedelta(days=expires_in_days)
         scope.sign(_settings().signing_secret)
         _write_yaml(manifest, scope.model_dump(mode="json"))
         reloaded = load_manifest(manifest)
@@ -396,16 +463,20 @@ def run(
     target_url: Annotated[str, typer.Option()] = "http://testserver",
     manifest: Annotated[Path, typer.Option()] = DEFAULT_MANIFEST,
     mode: Annotated[str, typer.Option()] = "clean",
-    budget: Annotated[int, typer.Option()] = 500,
+    budget: Annotated[int | None, typer.Option(min=1)] = None,
     sarif_out: Annotated[Path, typer.Option()] = Path("artifacts/janus_results.sarif.json"),
     report_out: Annotated[Path, typer.Option()] = Path("artifacts/janus_report.json"),
     witness_dir: Annotated[Path, typer.Option()] = Path("artifacts/witnesses"),
+    trace_db: Annotated[Path, typer.Option()] = Path("janus_traces.sqlite3"),
     fail_on_violation: Annotated[bool, typer.Option()] = False,
 ) -> None:
     """Execute compiled plans, adjudicate, minimize, and export artifacts."""
     settings = _settings()
+    effective_budget = budget if budget is not None else settings.max_requests
     try:
         scope = load_manifest(manifest)
+        if not scope.approved:
+            raise ScopeViolationError("run requires an approved manifest")
         if not scope.verify_signature(settings.signing_secret):
             raise ScopeViolationError("manifest is not signed by the configured secret")
         selected = [mode] if mode != "all" else list(ALL_MODES)
@@ -416,10 +487,30 @@ def run(
         client = _client_for(target_url)
         reports: list[tuple[CompiledTwinPlan, AdjudicationReport]] = []
         used = 0
-        with client:
+        with (
+            client,
+            TraceStore(
+                trace_db,
+                encryption_key=settings.trace_encryption_key,
+                retention_days=settings.retention_days,
+            ) as store,
+        ):
             for current_mode in selected:
+                started_at = datetime.now(UTC)
+                run_id = _trace_run_id(current_mode, started_at)
                 mode_reports, mode_used = _execute_mode(
-                    loaded, scope, settings, client, current_mode, budget, 0
+                    loaded,
+                    scope,
+                    settings,
+                    client,
+                    current_mode,
+                    effective_budget,
+                    0,
+                    trace_store=store,
+                    run_id=run_id,
+                )
+                _record_trace_run(
+                    store, scope, run_id, target_url, mode_used
                 )
                 reports.extend(mode_reports)
                 used += mode_used
@@ -470,28 +561,7 @@ def benchmark(
         report.write(out_dir)
     except (OSError, ValueError, RuntimeError, ScopeViolationError) as exc:
         _exit_error(str(exc))
-    table = Table(title="Janus-Auth benchmark")
-    for column in (
-        "Method",
-        "Recall",
-        "FP controls",
-        "Silent write",
-        "Regression",
-        "Coverage",
-        "Selective error",
-    ):
-        table.add_column(column)
-    for metrics in report.methods.values():
-        table.add_row(
-            metrics.method,
-            f"{metrics.known_defect_recall:.2f}",
-            f"{metrics.false_positive_rate_on_controls:.2f}",
-            f"{metrics.silent_write_detection_rate:.2f}",
-            f"{metrics.access_regression_detection_rate:.2f}",
-            f"{metrics.decision_coverage:.2f}",
-            f"{metrics.selective_error:.2f}",
-        )
-    console.print(table)
+    _print_benchmark_table(report)
     console.print(f"[green]benchmark complete[/green] -> {out_dir}")
 
 
@@ -509,6 +579,10 @@ def demo(
             CedarOracle.from_file(DEFAULT_POLICY),
             signing_secret=settings.signing_secret,
             policy_sha256=hashlib.sha256(policy_text.encode("utf-8")).hexdigest(),
+            synthesizer=Z3Synthesizer(
+                CedarOracle.from_file(DEFAULT_POLICY),
+                timeout_ms=settings.z3_timeout_ms,
+            ),
         )
         plans = compiler.compile_suite(manifest)
         _write_plans(out_dir / "compiled_plans.json", plans)
@@ -516,10 +590,30 @@ def demo(
         client = TestClient(create_app(), follow_redirects=False)
         reports: list[tuple[CompiledTwinPlan, AdjudicationReport]] = []
         used = 0
-        with client:
+        with (
+            client,
+            TraceStore(
+                out_dir / "janus_traces.sqlite3",
+                encryption_key=settings.trace_encryption_key,
+                retention_days=settings.retention_days,
+            ) as store,
+        ):
             for mode in ALL_MODES:
+                started_at = datetime.now(UTC)
+                run_id = _trace_run_id(str(mode), started_at)
                 mode_reports, mode_used = _execute_mode(
-                    plans, manifest, settings, client, str(mode), 5000, 0
+                    plans,
+                    manifest,
+                    settings,
+                    client,
+                    str(mode),
+                    5000,
+                    0,
+                    trace_store=store,
+                    run_id=run_id,
+                )
+                _record_trace_run(
+                    store, manifest, run_id, "http://testserver", mode_used
                 )
                 reports.extend(mode_reports)
                 used += mode_used
@@ -536,6 +630,7 @@ def demo(
             plans, manifest, signing_secret=settings.signing_secret, budget=500
         ).run_full_evaluation()
         benchmark_report.write(out_dir / "benchmark_results")
+        _print_benchmark_table(benchmark_report)
         summary = {
             "plans": len(plans),
             "modes": len(ALL_MODES),

@@ -175,6 +175,11 @@ class CounterfactualExecutor:
             if url is None:
                 valid = False
                 break
+            if (
+                step.expected_role is ExpectedRole.PROBE
+                and plan.synthesized.consistency_bound_ms > 0
+            ):
+                time.sleep(plan.synthesized.consistency_bound_ms / 1000.0)
             body = dict(step.json_body) if step.json_body is not None else None
             if step.step_id == "reset":
                 body = {"vulnerability_mode": self._mode}

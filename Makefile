@@ -1,7 +1,7 @@
 .PHONY: setup lint typecheck test benchmark demo clean
 
 setup:
-	@test -d .venv || python3 -m venv .venv
+	@test -d .venv || python3.12 -m venv .venv
 	.venv/bin/python -m pip install -e ".[dev]"
 
 lint:
@@ -20,4 +20,4 @@ demo:
 	.venv/bin/janus-auth demo --out-dir artifacts/demo/
 
 clean:
-	rm -rf artifacts/ *.sqlite3 .pytest_cache .mypy_cache .ruff_cache build/ dist/ *.egg-info
+	rm -rf artifacts/ *.sqlite3* .pytest_cache .mypy_cache .ruff_cache build/ dist/ *.egg-info src/*.egg-info

@@ -51,6 +51,9 @@ class StaticCrossUserReplayBaseline:
     ) -> bool:
         return _a_probe_status(evidence) == 200
 
+    def covers(self, evidence: PairedExecutionEvidence) -> bool:
+        return evidence.branch_a.probe is not None
+
 
 class UnpairedSingleBranchAblation:
     """Branch A only, with canary/effect witnesses but no surviving-grant twin."""
@@ -64,6 +67,12 @@ class UnpairedSingleBranchAblation:
         if plan.synthesized.probe_type is ProbeType.PROTECTED_READ:
             return _a_probe_status(evidence) == 200
         return _a_mutated(evidence)
+
+    def covers(self, evidence: PairedExecutionEvidence) -> bool:
+        return (
+            evidence.branch_a.probe is not None
+            and evidence.branch_a.effect_witness is not None
+        )
 
 
 class StatusCodeOnlyOracleAblation:
@@ -81,6 +90,12 @@ class StatusCodeOnlyOracleAblation:
             return True
         return a_status in {401, 403, 404} and b_status in {401, 403, 404}
 
+    def covers(self, evidence: PairedExecutionEvidence) -> bool:
+        return (
+            evidence.branch_a.probe is not None
+            and evidence.branch_b.probe is not None
+        )
+
 
 class FullSystemMethod:
     """Z3 twin compiler plus the complete 4D adjudicator."""
@@ -92,6 +107,14 @@ class FullSystemMethod:
         self, plan: CompiledTwinPlan, evidence: PairedExecutionEvidence
     ) -> bool:
         return adjudicate(plan, evidence).verdict in _FINDING_VERDICTS
+
+    def covers(self, evidence: PairedExecutionEvidence) -> bool:
+        return (
+            evidence.branch_a.valid
+            and evidence.branch_b.valid
+            and evidence.branch_a.effect_witness is not None
+            and evidence.branch_b.effect_witness is not None
+        )
 
 
 __all__ = [

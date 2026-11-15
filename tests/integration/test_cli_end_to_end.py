@@ -52,6 +52,7 @@ from janus_auth.reporting.sarif import (
 )
 from janus_auth.runner import CounterfactualExecutor
 from janus_auth.security.gatekeeper import SafetyGatekeeper
+from janus_auth.security.store import TraceStore
 from janus_auth.targets.docvault_app import create_app
 
 CANARY = "JANUS_CANARY_reporting"
@@ -313,6 +314,7 @@ def test_benchmark_is_deterministic(
 @pytest.fixture()
 def cli_secret(monkeypatch: pytest.MonkeyPatch) -> str:
     monkeypatch.setenv("JANUS_SIGNING_SECRET", TEST_SIGNING_SECRET)
+    monkeypatch.setenv("JANUS_TRACE_ENCRYPTION_KEY", "task-13-trace-key")
     return TEST_SIGNING_SECRET
 
 
@@ -444,6 +446,8 @@ def test_cli_run_clean_and_failing_violation(
             str(out / "report.json"),
             "--witness-dir",
             str(out / "witnesses"),
+            "--trace-db",
+            str(out / "traces.sqlite3"),
         ],
     )
     assert result.exit_code == 0, result.output
@@ -451,6 +455,17 @@ def test_cli_run_clean_and_failing_violation(
     assert sarif["runs"][0]["results"] == []
     reports = json.loads((out / "report.json").read_text(encoding="utf-8"))
     assert len(reports) == 12
+    with TraceStore(
+        out / "traces.sqlite3",
+        encryption_key="task-13-trace-key",
+        retention_days=7,
+    ) as store:
+        run_ids = store.fetch_run_ids()
+        assert len(run_ids) == 1
+        verdicts = store.fetch_verdicts(run_ids[0])
+        assert len(verdicts) == 12
+        trace_text = json.dumps(verdicts)
+        assert "token_ada" not in trace_text
 
     finding_out = tmp_path / "silent"
     result = _runner().invoke(
@@ -473,6 +488,8 @@ def test_cli_run_clean_and_failing_violation(
             str(finding_out / "report.json"),
             "--witness-dir",
             str(finding_out / "witnesses"),
+            "--trace-db",
+            str(finding_out / "traces.sqlite3"),
             "--fail-on-violation",
         ],
     )
@@ -510,6 +527,7 @@ def test_cli_demo_generates_all_artifacts(
         "janus_report.json",
         "demo_summary.json",
         "minimized_plan.json",
+        "janus_traces.sqlite3",
         "benchmark_results/benchmark_report.json",
         "benchmark_results/benchmark_report.md",
     ):

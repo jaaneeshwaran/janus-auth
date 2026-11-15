@@ -114,6 +114,8 @@ This is a defensive verification tool for systems you own or are explicitly auth
 ```text
 janus-auth/
 ├── configs/                 # Cedar policy, scope manifest, OpenAPI description
+├── site/                    # Phase 5 landing page (Cobalt theme)
+├── spec-compliance/         # Requirement-by-requirement audit report
 ├── src/janus_auth/          # package root (security, oracle, compiler, runner, reporting, targets, benchmark)
 └── tests/                   # unit/, integration/, security/
 ```

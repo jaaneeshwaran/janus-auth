@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Janus-Auth: counterfactual authorization verification</title>
+  <meta name="description" content="Janus-Auth compiles last-grant and surviving-grant twins, runs both against an authorized API, and adjudicates the difference from canaries and state witnesses.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@500;600&family=IBM+Plex+Sans:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <header class="site-head">
+    <div class="container head-row">
+      <a class="wordmark" href="./index.html">Janus-Auth</a>
+      <nav class="nav" aria-label="Primary">
+        <a href="#twin">The twin</a>
+        <a href="#signals">Signals</a>
+        <a href="#measured">Measured</a>
+        <a href="#run">Run it</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="container hero-grid">
+        <div class="hero-copy">
+          <h1>Revocation is a state machine.</h1>
+          <p class="lead">Compile last-grant and surviving-grant twins, then diff what the API does.</p>
+          <div class="hero-actions">
+            <a class="key key--primary" href="#run">Run the demo</a>
+            <a class="text-link" href="../PROJECT_SPEC.md">Read the specification</a>
+          </div>
+        </div>
+
+        <aside class="cut ledger" aria-label="Recorded verdict ledger">
+          <div class="ledger-head">
+            <span class="ledger-title">Verdict ledger</span>
+            <span class="ledger-count">12 plans, 7 modes</span>
+          </div>
+          <pre class="field" id="field" aria-label="Verdict field: rows are twin plans, columns are target modes"><span>. . . . . . .</span>
+<span>. . . . . . .</span>
+<span>. . . . . . .</span>
+<span>. . . . . . .</span>
+<span>. . . . . . .</span>
+<span>. . . . . . .</span>
+<span>. . . . . . .</span>
+<span>. . . . . . .</span>
+<span>. . . . . . .</span>
+<span>. . . . . . .</span>
+<span>. . . . . . .</span>
+<span>. . . . . . .</span></pre>
+          <div class="field-legend">
+            <span><i class="mark mark--find" aria-hidden="true">#</i> confirmed finding</span>
+            <span><i class="mark" aria-hidden="true">.</i> conforms</span>
+            <span><i class="mark mark--masked" aria-hidden="true">:</i> masked</span>
+            <span><i class="mark mark--regress" aria-hidden="true">×</i> regression</span>
+          </div>
+          <div class="witness">
+            <p class="witness-line"><span class="mono">vuln_silent_write_on_403</span> produced five silent-write findings. The smallest witness shrank to 17 steps.</p>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <section class="section" id="gap">
+      <div class="container split">
+        <div>
+          <h2>A 200 is not a verdict.</h2>
+          <p>Static replay flags any 200 after revocation, blind to surviving grants and mutations behind a 403.</p>
+          <p>Janus-Auth asks both questions at once.</p>
+        </div>
+        <table class="ruled-table">
+          <caption class="sr-only">Recorded benchmark comparison</caption>
+          <thead>
+            <tr><th scope="col">Method</th><th scope="col">Reads</th><th scope="col">Recall</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Static replay</td><td>status only</td><td class="num">0.67</td></tr>
+            <tr><td>Unpaired branch</td><td>canary, no twin</td><td class="num">0.83</td></tr>
+            <tr><td>Status-code pair</td><td>twin, no body</td><td class="num">0.83</td></tr>
+            <tr class="is-signal"><td>Janus-Auth</td><td>canary, effect, twin</td><td class="num">1.00</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="section section--tint" id="twin">
+      <div class="container">
+        <div class="section-head">
+          <h2>Two branches. One transition.</h2>
+          <p class="section-note">Z3 solves for states one support tuple apart and checks every state through cedarpy.</p>
+        </div>
+        <div class="twin-diagram">
+          <article class="branch">
+            <div class="branch-meta"><span class="branch-name">Branch A</span><span class="branch-role">last grant</span></div>
+            <ol class="steps">
+              <li>reset</li>
+              <li>revoke</li>
+              <li>probe</li>
+              <li class="step-end">deny expected</li>
+            </ol>
+          </article>
+          <div class="pair-rule" aria-hidden="true"><span>identical transition and probe</span></div>
+          <article class="branch">
+            <div class="branch-meta"><span class="branch-name">Branch B</span><span class="branch-role">surviving grant</span></div>
+            <ol class="steps">
+              <li>reset</li>
+              <li>revoke</li>
+              <li>probe</li>
+              <li class="step-end">allow expected</li>
+            </ol>
+          </article>
+        </div>
+        <div class="twin-foot">
+          <p>Branch A denies. Branch B must allow. A leak in A is a finding; a denial in B is a regression.</p>
+          <pre class="mono twin-code">CONFIRMED_VIOLATION  SILENT_WRITE_SIDE_EFFECT
+probe 403  state mutated  true</pre>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="signals">
+      <div class="container">
+        <div class="section-head">
+          <h2>Six lifecycle signals.</h2>
+          <p class="section-note">Each mode isolates one defect. The adjudicator reads canaries, post-probe state, and the surviving-grant control.</p>
+        </div>
+        <ul class="signal-list">
+          <li><h3>BOLA read leak</h3><p>Canary present after revocation.</p></li>
+          <li><h3>Silent write side effect</h3><p>State mutated behind a 403.</p></li>
+          <li><h3>Stale group cache</h3><p>Pending member still authorized.</p></li>
+          <li><h3>Former owner retention</h3><p>Former owner survives transfer.</p></li>
+          <li><h3>Broken delegation cascade</h3><p>Delegation outlives its parent.</p></li>
+          <li><h3>Over-revocation regression</h3><p>Branch B denied despite a surviving grant.</p></li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="section section--graphite" id="measured">
+      <div class="container">
+        <div class="section-head">
+          <h2>Measured, not asserted.</h2>
+          <p class="section-note">Nine cases: three controls and six seeded defects, under a 300-request budget.</p>
+        </div>
+        <div class="figures">
+          <div class="figure-block"><span class="figure num">1.00</span><span class="figure-label">defect recall</span></div>
+          <div class="figure-block"><span class="figure num">0.00</span><span class="figure-label">false positives</span></div>
+          <div class="figure-block"><span class="figure num">15</span><span class="figure-label">findings, seven modes</span></div>
+          <div class="figure-block"><span class="figure num">31 → 17</span><span class="figure-label">minimized witness steps</span></div>
+        </div>
+        <table class="ruled-table graphite-table">
+          <thead>
+            <tr><th scope="col">Method</th><th scope="col">Recall</th><th scope="col">FP</th><th scope="col">Silent write</th><th scope="col">Regression</th><th scope="col">Selective error</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Static replay</td><td class="num">0.67</td><td class="num">0.33</td><td class="num">0.00</td><td class="num">0.00</td><td class="num">0.33</td></tr>
+            <tr><td>Unpaired branch</td><td class="num">0.83</td><td class="num">0.33</td><td class="num">1.00</td><td class="num">0.00</td><td class="num">0.22</td></tr>
+            <tr><td>Status-code pair</td><td class="num">0.83</td><td class="num">0.33</td><td class="num">0.00</td><td class="num">1.00</td><td class="num">0.22</td></tr>
+            <tr class="is-signal"><td>Janus-Auth</td><td class="num">1.00</td><td class="num">0.00</td><td class="num">1.00</td><td class="num">1.00</td><td class="num">0.00</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="section" id="run">
+      <div class="container run-grid">
+        <div>
+          <h2>Run the ledger yourself.</h2>
+          <p>The demo compiles the policy, runs seven modes, minimizes a witness, and writes SARIF plus pytest replay files.</p>
+          <div class="command">
+            <code class="mono" id="command">janus-auth demo --out-dir artifacts/demo/</code>
+            <button class="copy-key" id="copy" type="button" aria-label="Copy demo command">Copy</button>
+          </div>
+          <p class="run-note">265 tests pass. 26 files pass mypy. No network beyond the target.</p>
+        </div>
+        <dl class="gate-list">
+          <div><dt>Compiler</dt><dd>Cedar plus Z3, distance 1</dd></div>
+          <div><dt>Executor</dt><dd>reset per branch, epoch witnessed</dd></div>
+          <div><dt>Adjudicator</dt><dd>canary, effect witness, control</dd></div>
+          <div><dt>Boundary</dt><dd>signed manifest, allowlisted hosts</dd></div>
+        </dl>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-foot">
+    <div class="container foot-row">
+      <div>
+        <p class="wordmark">Janus-Auth</p>
+        <p class="foot-note">Synthetic principals and canaries only. Traces are redacted, encrypted, retained for seven days.</p>
+      </div>
+      <nav class="foot-links" aria-label="Project">
+        <a href="../README.md">Readme</a>
+        <a href="../PROJECT_SPEC.md">Specification</a>
+        <a href="../spec-compliance/REPORT.md">Compliance report</a>
+        <a href="../LICENSE">MIT license</a>
+      </nav>
+    </div>
+  </footer>
+
+  <script>
+    const LEDGER = [
+      [0,0,0,0,0,0,0],
+      [0,0,0,0,2,0,0],
+      [0,0,0,0,0,2,0],
+      [0,2,0,0,0,0,3],
+      [1,2,1,1,1,1,1],
+      [0,2,0,0,0,2,3],
+      [0,0,2,0,0,0,0],
+      [0,0,2,0,0,2,0],
+      [0,0,0,2,0,0,0],
+      [0,0,0,2,0,2,0],
+      [0,0,0,0,0,0,0],
+      [0,0,0,0,0,2,0]
+    ];
+    const CHARS = ['#', '×', ':', '.'];
+    const CLASSES = ['mark--find', 'mark--regress', 'mark--masked', ''];
+    const field = document.getElementById('field');
+    if (field) {
+      field.replaceChildren();
+      for (const row of LEDGER) {
+        const line = document.createElement('span');
+        line.className = 'field-line';
+        for (const cell of row) {
+          const mark = document.createElement('i');
+          mark.className = 'mark' + (CLASSES[cell] ? ' ' + CLASSES[cell] : '');
+          mark.textContent = cell === 0 ? '.' : CHARS[cell];
+          line.append(mark, document.createTextNode(' '));
+        }
+        field.append(line);
+      }
+    }
+
+    const copy = document.getElementById('copy');
+    const command = document.getElementById('command');
+    if (copy && command) {
+      copy.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(command.textContent);
+          copy.textContent = 'Copied';
+        } catch {
+          copy.textContent = 'Select the command';
+        }
+        window.setTimeout(() => { copy.textContent = 'Copy'; }, 1400);
+      });
+    }
+  </script>
+</body>
+</html>

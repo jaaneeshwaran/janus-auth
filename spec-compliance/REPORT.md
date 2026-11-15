@@ -8,7 +8,7 @@ read against its enforcement path and its tests; two independent read-only audit
 security/CLI and pipeline halves, and every divergence they raised was re-checked in the code
 before classification.
 
-**Verdict counts:** implemented 27, partial 1, absent 2, stronger-than-spec 2, contradicted 0.
+**Verdict counts:** implemented 28, partial 0, absent 2, stronger-than-spec 2, contradicted 0.
 
 | ID | Requirement | Verdict | Evidence |
 |---|---|---|---|
@@ -41,7 +41,7 @@ before classification.
 | M7 | `JANUS_Z3_TIMEOUT_MS` bounds synthesis. | implemented | `cli.py _compile`/`demo` construct `Z3Synthesizer(timeout_ms=settings.z3_timeout_ms)`. |
 | M8 | Retention purge runs on store open. | implemented | `TraceStore._purge_expired`. |
 | M9 | GDPR/DPDP posture: synthetic data only, redacted headers, encrypted TTL traces. | implemented | Redactor + TraceStore + synthetic fixtures. |
-| M10 | Expected: Phase 5 landing page in `site/`. | partial | Implemented in the final step of this plan; see `site/`. |
+| M10 | Expected: Phase 5 landing page in `site/`. | implemented | `site/index.html` with Cobalt tokens and `site/styles.css`; Hallmark sweep: 0 FAIL, 0 WARN, 2 recorded layout waivers, render tier clean at 375, 1280, 1440 and 1920. |
 | M11 | Pinned `schemathesis==4.33.3` dev dependency. | absent | Present in `pyproject.toml`, not used by any test; the specification does not require a Schemathesis suite. Low-severity dependency drift. |
 | M12 | Optional AST fallback if the cedarpy wheel is unavailable. | absent | No fallback evaluator exists; cedarpy is a hard dependency. Low-severity risk-mitigation gap (R-05). |
 | M13 | README describes the delivered status. | implemented | Status updated to MVP complete; CLI table and env vars match the code. |
@@ -85,3 +85,5 @@ janus-auth demo                    findings=15, minimization 31 -> 17, artifacts
   with no direct §9.4.2 mandate; both are documented and used.
 - The benchmark records a per-case `coverage` map, which is a stronger artifact than the
   specification's single metric line.
+- The landing page adds `site/`, a presentation layer with no product behavior; it is verified
+  separately by the Hallmark static and render tiers.

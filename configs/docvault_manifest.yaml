@@ -1,0 +1,106 @@
+# DocVault scope manifest (committed unapproved draft).
+#
+# Approval is a human gate: `janus-auth approve-manifest` writes a real approver,
+# approval timestamp, manifest_sha256, and HMAC-SHA256 signature.  Tests construct a
+# signed approved copy from this file with a test-only secret.
+approved: false
+approver: null
+approved_at: null
+policy_sha256: 16c0cc139cbbe6fd11c501c268eb902e1422c41b802cd0aa6129d3bd89a47c97
+manifest_sha256: null
+allowed_hosts:
+  - 127.0.0.1
+  - localhost
+  - testserver
+max_requests: 500
+rate_limit_rps: 50.0
+allow_destructive: false
+reset_endpoint: /api/v1/admin/reset
+transition_endpoints:
+  - family: direct_share_revoke
+    method: DELETE
+    path_template: /api/v1/documents/{doc_id}/shares/{user_id}
+  - family: group_member_remove
+    method: DELETE
+    path_template: /api/v1/groups/{group_id}/members/{user_id}
+  - family: delegation_revoke
+    method: DELETE
+    path_template: /api/v1/documents/{doc_id}/delegations/{to_user_id}
+  - family: role_downgrade
+    method: POST
+    path_template: /api/v1/users/{user_id}/role
+  - family: ownership_transfer
+    method: POST
+    path_template: /api/v1/documents/{doc_id}/transfer
+  - family: tenant_change
+    method: POST
+    path_template: /api/v1/users/{user_id}/tenant
+principal_aliases:
+  ada: token_ada
+  bea: token_bea
+  carl: token_carl
+  dana: token_dana
+  ops_admin: token_admin
+operations:
+  direct_share_revoke:
+    family: direct_share_revoke
+    method: DELETE
+    path_template: /api/v1/documents/{doc_id}/shares/{user_id}
+    probe_method: GET
+    probe_path_template: /api/v1/documents/{doc_id}
+    witness_method: GET
+    witness_path_template: /api/v1/documents/{doc_id}/permissions
+    masked_query: masked
+  group_member_remove:
+    family: group_member_remove
+    method: DELETE
+    path_template: /api/v1/groups/{group_id}/members/{user_id}
+    probe_method: GET
+    probe_path_template: /api/v1/documents/{doc_id}
+    witness_method: GET
+    witness_path_template: /api/v1/documents/{doc_id}/permissions
+    masked_query: masked
+  delegation_revoke:
+    family: delegation_revoke
+    method: DELETE
+    path_template: /api/v1/documents/{doc_id}/delegations/{to_user_id}
+    probe_method: GET
+    probe_path_template: /api/v1/documents/{doc_id}
+    witness_method: GET
+    witness_path_template: /api/v1/documents/{doc_id}/permissions
+    masked_query: masked
+  role_downgrade:
+    family: role_downgrade
+    method: POST
+    path_template: /api/v1/users/{user_id}/role
+    probe_method: GET
+    probe_path_template: /api/v1/documents/{doc_id}
+    witness_method: GET
+    witness_path_template: /api/v1/documents/{doc_id}/permissions
+    masked_query: masked
+  ownership_transfer:
+    family: ownership_transfer
+    method: POST
+    path_template: /api/v1/documents/{doc_id}/transfer
+    probe_method: GET
+    probe_path_template: /api/v1/documents/{doc_id}
+    witness_method: GET
+    witness_path_template: /api/v1/documents/{doc_id}/permissions
+    masked_query: masked
+  tenant_change:
+    family: tenant_change
+    method: POST
+    path_template: /api/v1/users/{user_id}/tenant
+    probe_method: GET
+    probe_path_template: /api/v1/documents/{doc_id}
+    witness_method: GET
+    witness_path_template: /api/v1/documents/{doc_id}/permissions
+    masked_query: masked
+extractors:
+  doc_id: id
+  group_id: id
+  delegation_id: id
+  epoch: epoch
+canary_field: secret_content
+expires_at: null
+signature: null

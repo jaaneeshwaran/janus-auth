@@ -89,5 +89,5 @@ warn_return_any = true
 warn_unused_ignores = true
 
 [[tool.mypy.overrides]]
-module = ["cedarpy.*", "z3.*"]
+module = ["cedarpy.*", "z3.*", "yaml.*"]
 ignore_missing_imports = true

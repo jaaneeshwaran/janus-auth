@@ -1,0 +1,1188 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "DocVault API",
+    "version": "1.0.0",
+    "description": "Bundled reference and benchmark target for Janus-Auth counterfactual twin execution."
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8000",
+      "description": "Local DocVault benchmark target"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "paths": {
+    "/api/v1/admin/reset": {
+      "post": {
+        "operationId": "resetSandbox",
+        "summary": "Reset sandbox state and select a vulnerability mode",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResetRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Sandbox reset",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResetResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Administrator role required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/documents": {
+      "post": {
+        "operationId": "createDocument",
+        "summary": "Create a document owned by the authenticated principal",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateDocumentRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Document created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Document"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/documents/{doc_id}": {
+      "get": {
+        "operationId": "readDocument",
+        "summary": "Read a document, optionally masked to the public summary",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DocId"
+          },
+          {
+            "name": "masked",
+            "in": "query",
+            "required": false,
+            "description": "Return the masked public summary with secret_content set to null",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Document (full or masked public summary)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Document"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Access denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "operationId": "patchDocument",
+        "summary": "Reversibly update a document",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DocId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateDocumentRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated document",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Document"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Access denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/documents/{doc_id}/permissions": {
+      "get": {
+        "operationId": "readDocumentPermissions",
+        "summary": "Read the independent authorization state witness",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DocId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Independent permissions witness (owner/admin only)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PermissionsResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Owner or administrator role required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/documents/{doc_id}/shares": {
+      "post": {
+        "operationId": "grantDirectShare",
+        "summary": "Grant a direct share on a document",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DocId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DirectShareRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Direct share granted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DirectShareResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Owner or administrator role required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/documents/{doc_id}/shares/{user_id}": {
+      "delete": {
+        "operationId": "revokeDirectShare",
+        "summary": "Revoke a direct share (transition family 1)",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DocId"
+          },
+          {
+            "$ref": "#/components/parameters/UserId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Direct share revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevokeDirectShareResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Owner or administrator role required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/groups/{group_id}/members": {
+      "post": {
+        "operationId": "addGroupMember",
+        "summary": "Grant group membership",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/GroupId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GroupMemberRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Group member added",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupMemberResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Group administrator role required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/groups/{group_id}/members/{user_id}": {
+      "delete": {
+        "operationId": "removeGroupMember",
+        "summary": "Remove group membership (transition family 2)",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/GroupId"
+          },
+          {
+            "$ref": "#/components/parameters/UserId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Group member removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupMemberResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Group administrator role required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/documents/{doc_id}/group-shares": {
+      "post": {
+        "operationId": "grantGroupShare",
+        "summary": "Grant a group permission on a document",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DocId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GroupShareRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Group share granted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupShareResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Owner or administrator role required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/documents/{doc_id}/delegations": {
+      "post": {
+        "operationId": "grantDelegation",
+        "summary": "Grant a one-hop delegation",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DocId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DelegationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Delegation granted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DelegationResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Delegator lacks sufficient authority",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/documents/{doc_id}/delegations/{to_user_id}": {
+      "delete": {
+        "operationId": "revokeDelegation",
+        "summary": "Revoke a delegation (transition family 3)",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DocId"
+          },
+          {
+            "$ref": "#/components/parameters/ToUserId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Delegation revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevokeDelegationResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Owner or administrator role required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/users/{user_id}/role": {
+      "post": {
+        "operationId": "changeUserRole",
+        "summary": "Change a user role (transition family 4)",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/UserId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RoleRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Role changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoleResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Administrator role required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/documents/{doc_id}/transfer": {
+      "post": {
+        "operationId": "transferOwnership",
+        "summary": "Transfer document ownership (transition family 5)",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DocId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TransferRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Ownership transferred",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransferResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Owner or administrator role required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/users/{user_id}/tenant": {
+      "post": {
+        "operationId": "changeUserTenant",
+        "summary": "Change user tenant membership (transition family 6)",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/UserId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TenantRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Tenant membership changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Administrator role required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/documents/{doc_id}/denies": {
+      "post": {
+        "operationId": "addExplicitDeny",
+        "summary": "Add an explicit deny override",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DocId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DenyRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Explicit deny added",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DenyResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Owner or administrator role required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Synthetic DocVault bearer token for a benchmark principal."
+      }
+    },
+    "parameters": {
+      "DocId": {
+        "name": "doc_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "GroupId": {
+        "name": "group_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "UserId": {
+        "name": "user_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "ToUserId": {
+        "name": "to_user_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      }
+    },
+    "schemas": {
+      "Permission": {
+        "type": "string",
+        "enum": [
+          "read",
+          "write"
+        ]
+      },
+      "Role": {
+        "type": "string",
+        "enum": [
+          "member",
+          "admin"
+        ]
+      },
+      "ResetRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "vulnerability_mode"
+        ],
+        "properties": {
+          "vulnerability_mode": {
+            "type": "string",
+            "enum": [
+              "clean",
+              "vuln_stale_direct_cache",
+              "vuln_group_revocation_ignored",
+              "vuln_transfer_retains_owner",
+              "vuln_broken_delegation_cascade",
+              "vuln_silent_write_on_403",
+              "vuln_over_revocation_regression"
+            ]
+          }
+        }
+      },
+      "ResetResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "mode",
+          "epoch"
+        ],
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "epoch": {
+            "type": "integer"
+          }
+        }
+      },
+      "CreateDocumentRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "title",
+          "public_summary",
+          "secret_content"
+        ],
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "public_summary": {
+            "type": "string"
+          },
+          "secret_content": {
+            "type": "string"
+          }
+        }
+      },
+      "UpdateDocumentRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "secret_content",
+          "title"
+        ],
+        "properties": {
+          "secret_content": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "Document": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "owner_id",
+          "tenant_id",
+          "title",
+          "public_summary",
+          "secret_content"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "owner_id": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "public_summary": {
+            "type": "string"
+          },
+          "secret_content": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "PermissionsResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "owner_id",
+          "tenant_id",
+          "direct_users",
+          "groups",
+          "delegations",
+          "explicit_denies"
+        ],
+        "properties": {
+          "owner_id": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "direct_users": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "delegations": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "explicit_denies": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "DirectShareRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "user_id",
+          "permission"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string"
+          },
+          "permission": {
+            "$ref": "#/components/schemas/Permission"
+          }
+        }
+      },
+      "DirectShareResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "user_id",
+          "permission"
+        ],
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "string"
+          },
+          "permission": {
+            "$ref": "#/components/schemas/Permission"
+          }
+        }
+      },
+      "RevokeDirectShareResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "user_id"
+        ],
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "string"
+          }
+        }
+      },
+      "GroupMemberRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "user_id"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string"
+          }
+        }
+      },
+      "GroupMemberResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "group_id",
+          "user_id"
+        ],
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "group_id": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "string"
+          }
+        }
+      },
+      "GroupShareRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "group_id",
+          "permission"
+        ],
+        "properties": {
+          "group_id": {
+            "type": "string"
+          },
+          "permission": {
+            "$ref": "#/components/schemas/Permission"
+          }
+        }
+      },
+      "GroupShareResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "group_id"
+        ],
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "group_id": {
+            "type": "string"
+          }
+        }
+      },
+      "DelegationRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "from_user_id",
+          "to_user_id",
+          "permission"
+        ],
+        "properties": {
+          "from_user_id": {
+            "type": "string"
+          },
+          "to_user_id": {
+            "type": "string"
+          },
+          "permission": {
+            "$ref": "#/components/schemas/Permission"
+          }
+        }
+      },
+      "DelegationResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "status"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "RevokeDelegationResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "to_user_id"
+        ],
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "to_user_id": {
+            "type": "string"
+          }
+        }
+      },
+      "RoleRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "role"
+        ],
+        "properties": {
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          }
+        }
+      },
+      "RoleResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "user_id",
+          "role"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          }
+        }
+      },
+      "TransferRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "new_owner_id",
+          "retain_old_owner_direct_share"
+        ],
+        "properties": {
+          "new_owner_id": {
+            "type": "string"
+          },
+          "retain_old_owner_direct_share": {
+            "type": "boolean"
+          }
+        }
+      },
+      "TransferResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "doc_id",
+          "new_owner_id"
+        ],
+        "properties": {
+          "doc_id": {
+            "type": "string"
+          },
+          "new_owner_id": {
+            "type": "string"
+          }
+        }
+      },
+      "TenantRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "tenant_id",
+          "active"
+        ],
+        "properties": {
+          "tenant_id": {
+            "type": "string"
+          },
+          "active": {
+            "type": "boolean"
+          }
+        }
+      },
+      "TenantResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "user_id",
+          "tenant_id",
+          "active"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "active": {
+            "type": "boolean"
+          }
+        }
+      },
+      "DenyRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "user_id",
+          "permission"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string"
+          },
+          "permission": {
+            "$ref": "#/components/schemas/Permission"
+          }
+        }
+      },
+      "DenyResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "user_id"
+        ],
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "string"
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "detail"
+        ],
+        "properties": {
+          "detail": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

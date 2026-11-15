@@ -8,27 +8,40 @@ evaluation rather than Z3.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from janus_auth.compiler import (
+    MAX_MANIFEST_BYTES,
+    HeuristicOperationMapper,
     InfeasibleObligation,
+    PairPreservationError,
     PolicyEncodingDivergenceError,
     SynthesisReport,
+    WorkflowCompiler,
     Z3Synthesizer,
+    assert_pair_preserved,
+    canary_for,
+    load_manifest,
 )
 from janus_auth.models import (
+    CompiledTwinPlan,
     CounterfactualPairPlan,
     Decision,
+    ExpectedRole,
     PrincipalClass,
     ProbeType,
+    ScopeManifest,
     SupportState,
     TransitionFamily,
 )
 from janus_auth.oracle import CedarOracle
+from janus_auth.security.gatekeeper import ScopeViolationError
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 POLICY_PATH = REPO_ROOT / "configs" / "docvault.cedar"
@@ -407,3 +420,258 @@ def test_full_synthesis_completes_under_two_seconds(
     assert len(report.pairs) == 10
     assert len(report.infeasible) == 38
     assert elapsed < 2.0
+
+
+# --------------------------------------------------------------------------------------
+# Task 6: manifest loading, OpenAPI document, heuristic mapper, and workflow compiler
+# --------------------------------------------------------------------------------------
+
+OPENAPI_PATH = REPO_ROOT / "configs" / "docvault_openapi.json"
+MANIFEST_PATH = REPO_ROOT / "configs" / "docvault_manifest.yaml"
+#: Test-only signing secret; never the development fallback from ``config``.
+TEST_SIGNING_SECRET = "task-6-tests-only-secret"  # noqa: S105
+
+
+def signed_manifest() -> ScopeManifest:
+    """Load the committed draft and seal a test-only approved copy."""
+    manifest = load_manifest(MANIFEST_PATH)
+    manifest.approved = True
+    manifest.approver = "task-6-tests"
+    manifest.approved_at = datetime.now(UTC)
+    return manifest.sign(TEST_SIGNING_SECRET)
+
+
+@pytest.fixture(scope="module")
+def compiled_plans(oracle: CedarOracle) -> list[CompiledTwinPlan]:
+    compiler = WorkflowCompiler(oracle, signing_secret=TEST_SIGNING_SECRET)
+    return compiler.compile_suite(signed_manifest())
+
+
+def test_load_manifest_round_trips_committed_draft() -> None:
+    manifest = load_manifest(MANIFEST_PATH)
+
+    assert manifest.approved is False
+    assert manifest.signature is None
+    assert manifest.manifest_sha256 is None
+    assert manifest.policy_sha256 == hashlib.sha256(POLICY_PATH.read_bytes()).hexdigest()
+    assert manifest.canary_field == "secret_content"
+    assert manifest.extractors == {
+        "doc_id": "id",
+        "group_id": "id",
+        "delegation_id": "id",
+        "epoch": "epoch",
+    }
+    assert set(manifest.operations) == {family.value for family in TransitionFamily}
+    assert len(manifest.transition_endpoints) == 6
+
+
+def test_load_manifest_rejects_oversized_file(tmp_path: Path) -> None:
+    oversized = tmp_path / "oversized.yaml"
+    oversized.write_bytes(b"x" * (MAX_MANIFEST_BYTES + 1))
+
+    with pytest.raises(ValueError, match="too large"):
+        load_manifest(oversized)
+
+
+def test_mapper_proposes_all_families_without_approval() -> None:
+    openapi_doc = json.loads(OPENAPI_PATH.read_text(encoding="utf-8"))
+    cedar_text = POLICY_PATH.read_text(encoding="utf-8")
+
+    proposal = HeuristicOperationMapper.propose_mapping(openapi_doc, cedar_text)
+
+    assert proposal.approved is False
+    assert set(proposal.proposed_operations) == {family.value for family in TransitionFamily}
+    assert proposal.notes == []
+    assert proposal.policy_sha256 == hashlib.sha256(cedar_text.encode("utf-8")).hexdigest()
+
+
+def test_compile_suite_is_twelve_deterministic_plans(
+    oracle: CedarOracle, compiled_plans: list[CompiledTwinPlan]
+) -> None:
+    plan_ids = [plan.plan_id for plan in compiled_plans]
+
+    assert len(compiled_plans) == 12
+    assert plan_ids == sorted(plan_ids)
+    assert len(set(plan_ids)) == 12
+
+    again = WorkflowCompiler(oracle, signing_secret=TEST_SIGNING_SECRET).compile_suite(
+        signed_manifest()
+    )
+    assert [plan.model_dump(mode="json") for plan in again] == [
+        plan.model_dump(mode="json") for plan in compiled_plans
+    ]
+
+
+def test_pair_preservation_and_step_role_order(
+    compiled_plans: list[CompiledTwinPlan],
+) -> None:
+    for plan in compiled_plans:
+        assert_pair_preserved(plan)
+
+        for steps in (plan.branch_a_steps, plan.branch_b_steps):
+            roles = [step.expected_role for step in steps]
+            assert roles[0] is ExpectedRole.SETUP
+            assert roles[-5:] == [
+                ExpectedRole.PRE_WITNESS,
+                ExpectedRole.TRANSITION,
+                ExpectedRole.POST_TRANSITION_WITNESS,
+                ExpectedRole.PROBE,
+                ExpectedRole.EFFECT_WITNESS,
+            ]
+
+        setup_a = {
+            step.step_id for step in plan.branch_a_steps if step.expected_role is ExpectedRole.SETUP
+        }
+        setup_b = {
+            step.step_id for step in plan.branch_b_steps if step.expected_role is ExpectedRole.SETUP
+        }
+        assert len(setup_a ^ setup_b) == 1
+
+
+def test_plan_probe_principal_and_canary(compiled_plans: list[CompiledTwinPlan]) -> None:
+    for plan in compiled_plans:
+        assert plan.canary == canary_for(plan.plan_id)
+        assert plan.canary.startswith("JANUS_CANARY_")
+        if plan.synthesized.transition_family is TransitionFamily.OWNERSHIP_TRANSFER:
+            assert plan.probe_principal == "ada"
+        else:
+            assert plan.probe_principal == "bea"
+
+
+def test_compile_rejects_unsigned_manifest(oracle: CedarOracle) -> None:
+    manifest = load_manifest(MANIFEST_PATH)
+
+    with pytest.raises(ScopeViolationError, match="signature"):
+        WorkflowCompiler(oracle, signing_secret=TEST_SIGNING_SECRET).compile_suite(manifest)
+
+
+def test_compile_rejects_signed_but_unapproved_manifest(oracle: CedarOracle) -> None:
+    manifest = load_manifest(MANIFEST_PATH)
+    manifest.sign(TEST_SIGNING_SECRET)
+
+    with pytest.raises(ScopeViolationError, match="not approved"):
+        WorkflowCompiler(oracle, signing_secret=TEST_SIGNING_SECRET).compile_suite(manifest)
+
+
+def test_compile_rejects_tampered_manifest(oracle: CedarOracle) -> None:
+    manifest = signed_manifest()
+    manifest.max_requests = 9_999
+
+    with pytest.raises(ScopeViolationError, match="signature"):
+        WorkflowCompiler(oracle, signing_secret=TEST_SIGNING_SECRET).compile_suite(manifest)
+
+
+def test_compile_rejects_wrong_signing_secret(oracle: CedarOracle) -> None:
+    manifest = signed_manifest()
+
+    with pytest.raises(ScopeViolationError, match="signature"):
+        WorkflowCompiler(oracle, signing_secret="different-secret").compile_suite(manifest)  # noqa: S106
+
+
+def test_compile_rejects_policy_hash_mismatch(oracle: CedarOracle) -> None:
+    manifest = signed_manifest()
+
+    with pytest.raises(ScopeViolationError, match="policy"):
+        WorkflowCompiler(
+            oracle,
+            signing_secret=TEST_SIGNING_SECRET,
+            policy_sha256="0" * 64,
+        ).compile_suite(manifest)
+
+
+def test_cascade_plan_revokes_the_delegators_share(
+    compiled_plans: list[CompiledTwinPlan],
+) -> None:
+    cascade_plans = [plan for plan in compiled_plans if plan.plan_id.endswith("-cascade")]
+
+    assert len(cascade_plans) == 1
+    plan = cascade_plans[0]
+    transition = next(
+        step for step in plan.branch_a_steps if step.expected_role is ExpectedRole.TRANSITION
+    )
+    assert plan.synthesized.transition_family is TransitionFamily.DELEGATION_REVOKE
+    assert plan.probe_principal == "bea"
+    assert transition.method == "DELETE"
+    assert transition.path_template == "/api/v1/documents/{doc_id}/shares/carl"
+
+
+def test_masked_control_uses_masked_query_and_fresh_canary(
+    compiled_plans: list[CompiledTwinPlan],
+) -> None:
+    masked = next(plan for plan in compiled_plans if plan.masked_control)
+    base_id = masked.plan_id.removesuffix("-masked")
+    base = next(plan for plan in compiled_plans if plan.plan_id == base_id)
+
+    probe = next(
+        step for step in masked.branch_a_steps if step.expected_role is ExpectedRole.PROBE
+    )
+    assert probe.query == {"masked": "true"}
+    assert masked.canary != base.canary
+    assert masked.synthesized.plan_id == base.synthesized.plan_id
+    assert all(
+        step.query == {}
+        for step in masked.branch_b_steps
+        if step.expected_role is not ExpectedRole.PROBE
+    )
+
+
+def test_compiled_plans_never_embed_tokens(
+    compiled_plans: list[CompiledTwinPlan],
+) -> None:
+    payload = json.dumps(
+        [plan.model_dump(mode="json") for plan in compiled_plans], sort_keys=True
+    )
+
+    assert "token_" not in payload
+
+
+def test_openapi_covers_all_sixteen_operations() -> None:
+    doc = json.loads(OPENAPI_PATH.read_text(encoding="utf-8"))
+    methods = ("get", "post", "put", "patch", "delete")
+
+    assert doc["openapi"].startswith("3.1")
+    assert len(doc["paths"]) == 15
+    operations = [
+        (path, method)
+        for path, item in doc["paths"].items()
+        for method in item
+        if method in methods
+    ]
+    assert len(operations) == 16
+    for path, item in doc["paths"].items():
+        for method in methods:
+            if method in item:
+                assert "responses" in item[method], f"{method.upper()} {path} lacks responses"
+
+    bearer = doc["components"]["securitySchemes"]["bearerAuth"]
+    assert bearer["type"] == "http"
+    assert bearer["scheme"] == "bearer"
+    document = doc["components"]["schemas"]["Document"]["properties"]
+    assert {"id", "owner_id", "tenant_id", "title", "public_summary", "secret_content"} <= set(
+        document
+    )
+
+
+def test_canary_and_extractor_fields_are_signed() -> None:
+    manifest = signed_manifest()
+    assert manifest.verify_signature(TEST_SIGNING_SECRET) is True
+
+    tampered_canary = manifest.model_copy(deep=True)
+    tampered_canary.canary_field = "title"
+    assert tampered_canary.verify_signature(TEST_SIGNING_SECRET) is False
+
+    tampered_extractor = manifest.model_copy(deep=True)
+    tampered_extractor.extractors["doc_id"] = "owner_id"
+    assert tampered_extractor.verify_signature(TEST_SIGNING_SECRET) is False
+
+
+def test_assert_pair_preserved_rejects_divergent_probe(
+    compiled_plans: list[CompiledTwinPlan],
+) -> None:
+    plan = compiled_plans[0]
+    divergent_probe = plan.branch_b_steps[-2].model_copy(update={"query": {"masked": "true"}})
+    branch_b = [*plan.branch_b_steps[:-2], divergent_probe, plan.branch_b_steps[-1]]
+    broken = plan.model_copy(update={"branch_b_steps": branch_b})
+
+    with pytest.raises(PairPreservationError, match="probe"):
+        assert_pair_preserved(broken)

@@ -283,6 +283,8 @@ class ScopeManifest(StrictModel):
     transition_endpoints: list[TransitionEndpoint] = Field(default_factory=list)
     principal_aliases: dict[str, str] = Field(default_factory=dict)
     operations: dict[str, OperationMap] = Field(default_factory=dict)
+    extractors: dict[str, str] = Field(default_factory=dict)
+    canary_field: str = "secret_content"
     expires_at: datetime | None = None
     signature: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 

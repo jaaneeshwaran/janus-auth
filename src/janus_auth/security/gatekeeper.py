@@ -13,11 +13,12 @@ The gatekeeper never opens a network socket: for non-``testserver`` hosts it onl
 from __future__ import annotations
 
 import ipaddress
+import posixpath
 import re
 import socket
 import time
 from collections.abc import Callable, Sequence
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from janus_auth.models import ScopeManifest
 
@@ -28,6 +29,10 @@ _ALLOWED_SCHEMES = frozenset({"http", "https"})
 _TEST_HOST = "testserver"
 _METADATA_IP = ipaddress.ip_address("169.254.169.254")
 _PLACEHOLDER = re.compile(r"\{[^{}/]+\}")
+_MULTIPLE_SLASHES = re.compile(r"/{2,}")
+# %2f = '/', %2e = '.', %5c = '\\', %25 = '%' (double-encoding).  A target server may
+# decode any of these into a path different from the one matched here.
+_SUSPICIOUS_ENCODING = re.compile(r"%(?:2f|2e|5c|25)", re.IGNORECASE)
 
 
 class ScopeViolationError(Exception):
@@ -88,21 +93,44 @@ class _TokenBucket:
         self._tokens -= 1.0
 
 
-def _normalise_path(path: str) -> str:
-    """Strip trailing slashes (except the root) without touching placeholders."""
+def _collapse_dot_segments(path: str) -> str:
+    """Collapse repeated slashes and ``.``/``..`` segments into a canonical path."""
     if not path:
         return "/"
-    if len(path) > 1 and path.endswith("/"):
-        stripped = path.rstrip("/")
-        return stripped or "/"
-    return path
+    collapsed = _MULTIPLE_SLASHES.sub("/", path)
+    normalised = posixpath.normpath(collapsed)
+    if normalised in ("", "."):
+        return "/"
+    if not normalised.startswith("/"):
+        normalised = "/" + normalised
+    return normalised
+
+
+def _canonical_request_path(path: str) -> str:
+    """Canonicalise a request path for destructive-policy matching.
+
+    Encoded separators, encoded dot segments, encoded percent signs (double-encoding),
+    and backslashes are rejected outright: a target server that decodes them could route
+    the request to a different path than the one matched here.  Plain dot segments are
+    collapsed so ``/shares/../../doc_1`` cannot masquerade as a transition endpoint.
+    """
+    if "\\" in path or _SUSPICIOUS_ENCODING.search(path):
+        raise ScopeViolationError(
+            "request path contains an encoded separator, dot segment, percent sign, "
+            "or backslash"
+        )
+    decoded = unquote(path)
+    if "\\" in decoded:
+        raise ScopeViolationError("request path contains a backslash")
+    return _collapse_dot_segments(decoded)
 
 
 def _normalise_declared_path(value: str) -> str:
-    """Return a comparable path for a declared path template or endpoint.
+    """Return a canonical path for a declared path template or reset endpoint.
 
     ``value`` may be an absolute URL or a bare path.  Query strings and fragments are
-    ignored, exactly as they are for the request URL.
+    ignored, exactly as they are for the request URL.  Declared values come from the
+    signed manifest, so they are decoded and collapsed rather than rejected.
     """
     parsed = urlsplit(value)
     path = parsed.path
@@ -112,7 +140,7 @@ def _normalise_declared_path(value: str) -> str:
         path = value
     if not path.startswith("/"):
         path = "/" + path
-    return _normalise_path(path)
+    return _collapse_dot_segments(unquote(path))
 
 
 def _template_regex(template: str) -> re.Pattern[str]:
@@ -218,7 +246,7 @@ class SafetyGatekeeper:
                 "reset endpoint, or when allow_destructive is true"
             )
 
-    def validate_request(self, method: str, url: str) -> None:
+    def validate_request(self, url: str, method: str = "GET") -> None:
         """Admit one outbound request or raise before any socket work is attempted."""
         self.validate_url(url, method)
 
@@ -269,7 +297,7 @@ class SafetyGatekeeper:
         if self._manifest.allow_destructive:
             return True
 
-        path = _normalise_path(request_path or "/")
+        path = _canonical_request_path(request_path or "/")
 
         for endpoint in self._manifest.transition_endpoints:
             if endpoint.method != "DELETE":

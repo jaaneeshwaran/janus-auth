@@ -799,7 +799,7 @@ def test_gatekeeper_blocks_acceptance_urls_before_socket(
     )
     monkeypatch.setattr(socket, "socket", _fail_socket)
     with pytest.raises(ScopeViolationError):
-        gatekeeper.validate_request("GET", url)
+        gatekeeper.validate_request(url)
 
 
 def test_gatekeeper_blocks_allowlisted_metadata_ip_at_ssrf_layer() -> None:
@@ -964,15 +964,15 @@ def test_gatekeeper_rate_limit_uses_injected_clock() -> None:
         resolver=fixed_resolver("127.0.0.1"),
     )
     url = "http://127.0.0.1/resource"
-    gatekeeper.validate_request("GET", url)
-    gatekeeper.validate_request("GET", url)
+    gatekeeper.validate_request(url)
+    gatekeeper.validate_request(url)
     with pytest.raises(RateLimitExceededError):
-        gatekeeper.validate_request("GET", url)
+        gatekeeper.validate_request(url)
 
     clock.now = 0.5
-    gatekeeper.validate_request("GET", url)
+    gatekeeper.validate_request(url)
     with pytest.raises(RateLimitExceededError):
-        gatekeeper.validate_request("GET", url)
+        gatekeeper.validate_request(url)
 
 
 def test_gatekeeper_enforces_budget_after_url_checks_and_before_socket(
@@ -991,13 +991,13 @@ def test_gatekeeper_enforces_budget_after_url_checks_and_before_socket(
         gatekeeper.validate_url(url)
     assert gatekeeper.requests_used == 0
 
-    gatekeeper.validate_request("GET", url)
-    gatekeeper.validate_request("GET", url)
+    gatekeeper.validate_request(url)
+    gatekeeper.validate_request(url)
     assert gatekeeper.requests_used == 2
 
     monkeypatch.setattr(socket, "socket", _fail_socket)
     with pytest.raises(BudgetExhaustedError):
-        gatekeeper.validate_request("GET", url)
+        gatekeeper.validate_request(url)
 
 
 def test_gatekeeper_rejected_request_does_not_consume_budget() -> None:
@@ -1007,9 +1007,9 @@ def test_gatekeeper_rejected_request_does_not_consume_budget() -> None:
         resolver=fixed_resolver("127.0.0.1"),
     )
     with pytest.raises(ScopeViolationError):
-        gatekeeper.validate_request("GET", "http://evil.example.com/api")
+        gatekeeper.validate_request("http://evil.example.com/api")
     assert gatekeeper.requests_used == 0
-    gatekeeper.validate_request("GET", "http://127.0.0.1/resource")
+    gatekeeper.validate_request("http://127.0.0.1/resource")
     assert gatekeeper.requests_used == 1
 
 
@@ -1025,7 +1025,7 @@ def test_gatekeeper_and_client_do_not_follow_redirects() -> None:
 
     transport = httpx.MockTransport(handler)
     with httpx.Client(transport=transport, follow_redirects=False) as client:
-        gatekeeper.validate_request("GET", "http://testserver/api")
+        gatekeeper.validate_request("http://testserver/api")
         response = client.get("http://testserver/api")
 
     assert response.status_code == 302
@@ -1328,3 +1328,297 @@ def test_trace_store_close_is_idempotent(tmp_path: Path) -> None:
     store.close()
     with pytest.raises(RuntimeError, match="closed"):
         store.get_verdict("verdict-1")
+
+
+# ---------------------------------------------------------------------------
+# Task 3 review fixes
+# ---------------------------------------------------------------------------
+
+
+def test_gatekeeper_does_not_resolve_urls_rejected_by_early_checks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def spy_getaddrinfo(
+        host: str, port: object, *args: object, **kwargs: object
+    ) -> object:
+        calls.append(host)
+        raise AssertionError("getaddrinfo must not run for a rejected URL")
+
+    monkeypatch.setattr(socket, "getaddrinfo", spy_getaddrinfo)
+    gatekeeper = SafetyGatekeeper(make_signed_manifest(), secret=SECRET)
+    for url in ("file:///etc/passwd", "http://evil.example.com/api"):
+        with pytest.raises(ScopeViolationError):
+            gatekeeper.validate_request(url)
+    assert calls == []
+
+
+def test_gatekeeper_resolves_through_real_getaddrinfo_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_getaddrinfo(
+        host: str, port: object, *args: object, **kwargs: object
+    ) -> list[tuple[object, ...]]:
+        calls.append(host)
+        return [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                ("127.0.0.1", 0),
+            )
+        ]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    gatekeeper = SafetyGatekeeper(make_signed_manifest(), secret=SECRET)
+    gatekeeper.validate_url("http://localhost/health")
+    assert calls == ["localhost"]
+
+
+def test_gatekeeper_real_getaddrinfo_numeric_loopback() -> None:
+    gatekeeper = SafetyGatekeeper(make_signed_manifest(), secret=SECRET)
+    gatekeeper.validate_url("http://127.0.0.1/health")
+
+
+def test_gatekeeper_getaddrinfo_oserror_is_ssrf_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def failing_getaddrinfo(
+        host: str, port: object, *args: object, **kwargs: object
+    ) -> object:
+        raise socket.gaierror("dns failure")
+
+    monkeypatch.setattr(socket, "getaddrinfo", failing_getaddrinfo)
+    gatekeeper = SafetyGatekeeper(make_signed_manifest(), secret=SECRET)
+    with pytest.raises(SSRFBlockedError):
+        gatekeeper.validate_url("http://localhost/health")
+
+
+def make_delete_policy_gatekeeper() -> SafetyGatekeeper:
+    manifest = make_signed_manifest(
+        transition_endpoints=[
+            TransitionEndpoint(
+                family=TransitionFamily.DIRECT_SHARE_REVOKE,
+                method="DELETE",
+                path_template="/api/v1/documents/{doc_id}/shares/{user_id}",
+            )
+        ],
+        reset_endpoint="/api/v1/admin/reset",
+    )
+    return SafetyGatekeeper(
+        manifest, secret=SECRET, resolver=fixed_resolver("127.0.0.1")
+    )
+
+
+def test_gatekeeper_keeps_legitimate_transition_delete_allowed() -> None:
+    gatekeeper = make_delete_policy_gatekeeper()
+    gatekeeper.validate_url(
+        "http://testserver/api/v1/documents/doc_1/shares/bea", "DELETE"
+    )
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/v1/documents/doc_1/shares/..%2F..%2Fdoc_1",
+        "/api/v1/documents/doc_1/shares/bea%2F..%2F..%2Fdoc_1",
+        "/api/v1/documents/doc_1/shares/%2e%2e/%2e%2e/doc_1",
+        "/api/v1/documents/doc_1/shares/../../doc_1",
+        "/api/v1/documents/doc_1/shares/bea/../../../doc_1",
+        "/api/v1/documents/doc_1/shares/..%5C..%5Cdoc_1",
+        "//api/v1/documents/doc_1",
+    ],
+)
+def test_gatekeeper_blocks_delete_path_traversal(path: str) -> None:
+    gatekeeper = make_delete_policy_gatekeeper()
+    with pytest.raises(ScopeViolationError):
+        gatekeeper.validate_url("http://testserver" + path, "DELETE")
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/v1/admin/reset/../../../documents/doc_1",
+        "/api/v1/admin/%2e%2e/admin/reset",
+        "/api/v1/admin/reset%2F..%2F..%2Fdocuments%2Fdoc_1",
+    ],
+)
+def test_gatekeeper_blocks_reset_endpoint_path_traversal(path: str) -> None:
+    gatekeeper = make_delete_policy_gatekeeper()
+    with pytest.raises(ScopeViolationError):
+        gatekeeper.validate_url("http://testserver" + path, "DELETE")
+
+
+def test_gatekeeper_normalizes_reset_path_dot_segments() -> None:
+    # The path resolves to the declared reset endpoint, so it remains permitted.
+    gatekeeper = make_delete_policy_gatekeeper()
+    gatekeeper.validate_url("http://testserver/api/v1/admin/x/../reset", "DELETE")
+
+
+def test_gatekeeper_collapses_repeated_slashes_for_delete_policy() -> None:
+    gatekeeper = make_delete_policy_gatekeeper()
+    gatekeeper.validate_url(
+        "http://testserver//api/v1/documents/doc_1/shares/bea", "DELETE"
+    )
+    with pytest.raises(ScopeViolationError):
+        gatekeeper.validate_url("http://testserver//api/v1/documents/doc_1", "DELETE")
+
+
+def test_redactor_scrubs_httpx_headers_mapping() -> None:
+    headers = httpx.Headers(
+        {
+            "Authorization": "Basic dXNlcjpwYXNz",
+            "X-Api-Key": "secret-key-value",
+            "Content-Type": "application/json",
+        }
+    )
+    sanitized = Redactor.sanitize_trace({"headers": headers})
+
+    assert isinstance(sanitized["headers"], dict)
+    header_map = {key.lower(): value for key, value in sanitized["headers"].items()}
+    assert header_map["authorization"] == "Bearer [REDACTED]"
+    assert header_map["x-api-key"] == "Bearer [REDACTED]"
+    assert header_map["content-type"] == "application/json"
+
+    rendered = json.dumps(sanitized)
+    assert "dXNlcjpwYXNz" not in rendered
+    assert "secret-key-value" not in rendered
+
+
+def test_redactor_scrubs_multi_items_pairs() -> None:
+    headers = httpx.Headers(
+        [
+            ("authorization", "Basic dXNlcjpwYXNz"),
+            ("x-api-key", "secret-key-value"),
+            ("set-cookie", "a=1"),
+            ("set-cookie", "b=2"),
+            ("content-type", "application/json"),
+        ]
+    )
+    sanitized = Redactor.sanitize_trace({"headers": headers.multi_items()})
+
+    pairs = sanitized["headers"]
+    assert isinstance(pairs, list)
+    redacted_names = {
+        name.lower()
+        for name, value in pairs
+        if value == "Bearer [REDACTED]"
+    }
+    assert {"authorization", "x-api-key", "set-cookie"} <= redacted_names
+
+    rendered = json.dumps(sanitized)
+    assert "dXNlcjpwYXNz" not in rendered
+    assert "secret-key-value" not in rendered
+    assert "a=1" not in rendered
+    assert "b=2" not in rendered
+
+
+def test_redactor_scrubs_two_element_sequences() -> None:
+    assert Redactor.sanitize_trace(("authorization", "Basic dXNlcjpwYXNz")) == (
+        "authorization",
+        "Bearer [REDACTED]",
+    )
+    assert Redactor.sanitize_trace(["X-Api-Key", "secret-key-value"]) == [
+        "X-Api-Key",
+        "Bearer [REDACTED]",
+    ]
+
+
+def test_redactor_rejects_non_json_leaves() -> None:
+    with pytest.raises(TypeError, match="non-JSON"):
+        Redactor.sanitize_trace({"bad": object()})
+    with pytest.raises(TypeError, match="non-JSON"):
+        Redactor.sanitize_trace({"bad": b"raw-bytes"})
+
+
+def test_trace_store_redacts_httpx_headers(tmp_path: Path) -> None:
+    db_path = tmp_path / "janus_traces.sqlite3"
+    headers = httpx.Headers(
+        {
+            "Authorization": "Basic dXNlcjpwYXNz",
+            "X-Api-Key": "secret-key-value",
+        }
+    )
+    with TraceStore(db_path, encryption_key=TRACE_PASSPHRASE) as store:
+        store.record_verdict(
+            "verdict-1",
+            "run-1",
+            "plan-1",
+            TransitionFamily.DIRECT_SHARE_REVOKE,
+            ProbeType.PROTECTED_READ,
+            VerdictKind.CONFORMS,
+            ViolationSubtype.NONE,
+            {"headers": headers},
+        )
+        row = store.get_verdict("verdict-1")
+
+    assert row is not None
+    trace = row["trace"]
+    header_map = {key.lower(): value for key, value in trace["headers"].items()}
+    assert header_map["authorization"] == "Bearer [REDACTED]"
+    assert header_map["x-api-key"] == "Bearer [REDACTED]"
+    rendered = json.dumps(trace)
+    assert "dXNlcjpwYXNz" not in rendered
+    assert "secret-key-value" not in rendered
+
+
+def test_trace_store_normalizes_caller_timestamps(tmp_path: Path) -> None:
+    db_path = tmp_path / "janus_traces.sqlite3"
+    with TraceStore(db_path, encryption_key=TRACE_PASSPHRASE) as store:
+        store.record_verdict(
+            "verdict-1",
+            "run-1",
+            "plan-1",
+            TransitionFamily.DIRECT_SHARE_REVOKE,
+            ProbeType.PROTECTED_READ,
+            VerdictKind.CONFORMS,
+            ViolationSubtype.NONE,
+            make_trace(),
+            created_at="2026-11-15T10:00:00+02:00",
+        )
+        row = store.get_verdict("verdict-1")
+        assert row is not None
+        assert row["created_at"] == "2026-11-15T08:00:00.000000+00:00"
+
+        with pytest.raises(ValueError, match="ISO-8601"):
+            store.record_verdict(
+                "verdict-2",
+                "run-1",
+                "plan-1",
+                TransitionFamily.DIRECT_SHARE_REVOKE,
+                ProbeType.PROTECTED_READ,
+                VerdictKind.CONFORMS,
+                ViolationSubtype.NONE,
+                make_trace(),
+                created_at="not-a-timestamp",
+            )
+
+
+def test_trace_store_retention_normalizes_offset_timestamps(tmp_path: Path) -> None:
+    db_path = tmp_path / "janus_traces.sqlite3"
+    with TraceStore(
+        db_path, encryption_key=TRACE_PASSPHRASE, retention_days=7
+    ) as store:
+        store.record_verdict(
+            "old",
+            "run-1",
+            "plan-1",
+            TransitionFamily.DIRECT_SHARE_REVOKE,
+            ProbeType.PROTECTED_READ,
+            VerdictKind.CONFORMS,
+            ViolationSubtype.NONE,
+            make_trace(),
+            created_at="2020-01-01T00:00:00+05:00",
+        )
+        row = store.get_verdict("old")
+        assert row is not None
+        assert row["created_at"] == "2019-12-31T19:00:00.000000+00:00"
+
+    with TraceStore(
+        db_path, encryption_key=TRACE_PASSPHRASE, retention_days=7
+    ) as store:
+        assert store.get_verdict("old") is None

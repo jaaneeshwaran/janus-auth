@@ -62,12 +62,18 @@ def derive_fernet_key(passphrase: str) -> bytes:
 
 
 def _timestamp(value: datetime | str | None) -> str:
+    """Return the canonical microsecond ISO-8601 UTC timestamp used for retention."""
     if value is None:
         return datetime.now(UTC).isoformat(timespec="microseconds")
-    if isinstance(value, datetime):
-        moment = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
-        return moment.astimezone(UTC).isoformat(timespec="microseconds")
-    return value
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError("timestamp must be ISO-8601 text") from exc
+    else:
+        parsed = value
+    moment = parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+    return moment.astimezone(UTC).isoformat(timespec="microseconds")
 
 
 def _row_value(row: sqlite3.Row, column: str) -> object:

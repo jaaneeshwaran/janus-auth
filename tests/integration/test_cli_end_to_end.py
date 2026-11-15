@@ -4,14 +4,23 @@ from __future__ import annotations
 
 import ast
 import json
+import os
+import socket
 import subprocess
 import sys
+import threading
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+import uvicorn
+import yaml
+from fastapi.testclient import TestClient
+from typer.testing import CliRunner
 
 from janus_auth.benchmark import BenchmarkEvaluator
+from janus_auth.cli import app as cli_app
 from janus_auth.compiler import WorkflowCompiler, load_manifest
 from janus_auth.models import (
     AdjudicationReport,
@@ -29,6 +38,7 @@ from janus_auth.models import (
     ViolationSubtype,
 )
 from janus_auth.oracle import CedarOracle
+from janus_auth.oracle.adjudicator import adjudicate
 from janus_auth.reporting.replay_codegen import (
     generate_replay_witness,
     witness_is_credential_free,
@@ -40,6 +50,9 @@ from janus_auth.reporting.sarif import (
     build_sarif,
     write_sarif,
 )
+from janus_auth.runner import CounterfactualExecutor
+from janus_auth.security.gatekeeper import SafetyGatekeeper
+from janus_auth.targets.docvault_app import create_app
 
 CANARY = "JANUS_CANARY_reporting"
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -295,3 +308,285 @@ def test_benchmark_is_deterministic(
         plans, manifest, signing_secret=TEST_SIGNING_SECRET, budget=300
     ).run_full_evaluation()
     assert first.to_json() == second.to_json()
+
+
+@pytest.fixture()
+def cli_secret(monkeypatch: pytest.MonkeyPatch) -> str:
+    monkeypatch.setenv("JANUS_SIGNING_SECRET", TEST_SIGNING_SECRET)
+    return TEST_SIGNING_SECRET
+
+
+def _runner() -> CliRunner:
+    return CliRunner()
+
+
+def _approved_manifest(tmp_path: Path, secret: str) -> Path:
+    target = tmp_path / "manifest.yaml"
+    target.write_text(MANIFEST_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+    result = _runner().invoke(
+        cli_app,
+        [
+            "approve-manifest",
+            "--manifest",
+            str(target),
+            "--policy",
+            str(POLICY_PATH),
+            "--approver",
+            "cli-tests@example.org",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert secret
+    return target
+
+
+@pytest.fixture()
+def approved_manifest_file(tmp_path: Path, cli_secret: str) -> Path:
+    return _approved_manifest(tmp_path, cli_secret)
+
+
+@pytest.fixture()
+def compiled_plans_file(
+    tmp_path: Path, approved_manifest_file: Path, cli_secret: str
+) -> Path:
+    target = tmp_path / "plans.json"
+    result = _runner().invoke(
+        cli_app,
+        [
+            "compile",
+            "--policy",
+            str(POLICY_PATH),
+            "--manifest",
+            str(approved_manifest_file),
+            "--out",
+            str(target),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    return target
+
+
+def test_cli_validate_and_propose_mapping(tmp_path: Path, cli_secret: str) -> None:
+    result = _runner().invoke(
+        cli_app,
+        [
+            "validate",
+            "--policy",
+            str(POLICY_PATH),
+            "--manifest",
+            str(MANIFEST_PATH),
+            "--openapi",
+            str(MANIFEST_PATH.parent / "docvault_openapi.json"),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    draft = tmp_path / "draft.yaml"
+    result = _runner().invoke(
+        cli_app,
+        [
+            "propose-mapping",
+            "--openapi",
+            str(MANIFEST_PATH.parent / "docvault_openapi.json"),
+            "--policy",
+            str(POLICY_PATH),
+            "--out",
+            str(draft),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = yaml.safe_load(draft.read_text(encoding="utf-8"))
+    assert payload["approved"] is False
+    assert set(payload["proposed_operations"]) == {
+        "direct_share_revoke",
+        "group_member_remove",
+        "delegation_revoke",
+        "role_downgrade",
+        "ownership_transfer",
+        "tenant_change",
+    }
+
+
+def test_cli_approve_and_compile(
+    approved_manifest_file: Path, compiled_plans_file: Path, cli_secret: str
+) -> None:
+    reloaded = load_manifest(approved_manifest_file)
+    assert reloaded.approved is True
+    assert reloaded.verify_signature(cli_secret) is True
+    plans = json.loads(compiled_plans_file.read_text(encoding="utf-8"))
+    assert len(plans) == 12
+
+
+def test_cli_run_clean_and_failing_violation(
+    tmp_path: Path,
+    approved_manifest_file: Path,
+    compiled_plans_file: Path,
+    cli_secret: str,
+) -> None:
+    out = tmp_path / "clean"
+    result = _runner().invoke(
+        cli_app,
+        [
+            "run",
+            "--plans",
+            str(compiled_plans_file),
+            "--target-url",
+            "http://testserver",
+            "--manifest",
+            str(approved_manifest_file),
+            "--mode",
+            "clean",
+            "--budget",
+            "500",
+            "--sarif-out",
+            str(out / "results.sarif.json"),
+            "--report-out",
+            str(out / "report.json"),
+            "--witness-dir",
+            str(out / "witnesses"),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    sarif = json.loads((out / "results.sarif.json").read_text(encoding="utf-8"))
+    assert sarif["runs"][0]["results"] == []
+    reports = json.loads((out / "report.json").read_text(encoding="utf-8"))
+    assert len(reports) == 12
+
+    finding_out = tmp_path / "silent"
+    result = _runner().invoke(
+        cli_app,
+        [
+            "run",
+            "--plans",
+            str(compiled_plans_file),
+            "--target-url",
+            "http://testserver",
+            "--manifest",
+            str(approved_manifest_file),
+            "--mode",
+            "vuln_silent_write_on_403",
+            "--budget",
+            "500",
+            "--sarif-out",
+            str(finding_out / "results.sarif.json"),
+            "--report-out",
+            str(finding_out / "report.json"),
+            "--witness-dir",
+            str(finding_out / "witnesses"),
+            "--fail-on-violation",
+        ],
+    )
+    assert result.exit_code == 2, result.output
+    sarif = json.loads(
+        (finding_out / "results.sarif.json").read_text(encoding="utf-8")
+    )
+    assert sarif["runs"][0]["results"]
+    witnesses = list((finding_out / "witnesses").rglob("witness_*.py"))
+    assert witnesses
+    artifact_text = (
+        (finding_out / "results.sarif.json").read_text(encoding="utf-8")
+        + (finding_out / "report.json").read_text(encoding="utf-8")
+        + "".join(witness.read_text(encoding="utf-8") for witness in witnesses)
+    )
+    for token in (
+        "token_ada",
+        "token_bea",
+        "token_carl",
+        "token_dana",
+        "token_admin",
+    ):
+        assert token not in artifact_text
+
+
+def test_cli_demo_generates_all_artifacts(
+    tmp_path: Path, cli_secret: str
+) -> None:
+    out = tmp_path / "demo"
+    result = _runner().invoke(cli_app, ["demo", "--out-dir", str(out)])
+    assert result.exit_code == 0, result.output
+    for artifact in (
+        "compiled_plans.json",
+        "janus_results.sarif.json",
+        "janus_report.json",
+        "demo_summary.json",
+        "minimized_plan.json",
+        "benchmark_results/benchmark_report.json",
+        "benchmark_results/benchmark_report.md",
+    ):
+        assert (out / artifact).is_file(), artifact
+    summary = json.loads((out / "demo_summary.json").read_text(encoding="utf-8"))
+    assert summary["plans"] == 12
+    assert summary["findings"] >= 6
+    assert summary["minimization"]["reproduction_verified"] is True
+    assert summary["minimization"]["reduction_ratio"] >= 0.35
+    assert any((out / "witnesses").rglob("witness_*.py"))
+
+
+def test_generated_witness_reproduces_against_a_live_server(
+    tmp_path: Path,
+    benchmark_inputs: tuple[list[CompiledTwinPlan], ScopeManifest],
+) -> None:
+    plans, manifest = benchmark_inputs
+    plan = next(
+        item
+        for item in plans
+        if item.synthesized.probe_type is ProbeType.REVERSIBLE_WRITE
+        and item.plan_id.startswith("ct-direct_share_revoke")
+    )
+    with TestClient(create_app(), follow_redirects=False) as client:
+        executor = CounterfactualExecutor(
+            client,
+            SafetyGatekeeper(manifest, secret=TEST_SIGNING_SECRET),
+            mode="vuln_silent_write_on_403",
+        )
+        report = adjudicate(plan, executor.execute(plan))
+    assert report.verdict is VerdictKind.CONFIRMED_VIOLATION
+    report = report.model_copy(
+        update={
+            "evidence": {
+                **report.evidence,
+                "mode": "vuln_silent_write_on_403",
+            }
+        }
+    )
+    witness = write_replay_witness(tmp_path, plan, report)
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = int(probe.getsockname()[1])
+    config = uvicorn.Config(
+        create_app(), host="127.0.0.1", port=port, log_level="error"
+    )
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    for _ in range(500):
+        if server.started:
+            break
+        time.sleep(0.01)
+    assert server.started
+    env = os.environ.copy()
+    env.update(
+        {
+            "JANUS_TARGET_URL": f"http://127.0.0.1:{port}",
+            "JANUS_TOKEN_ADA": "token_ada",
+            "JANUS_TOKEN_BEA": "token_bea",
+            "JANUS_TOKEN_CARL": "token_carl",
+            "JANUS_TOKEN_DANA": "token_dana",
+            "JANUS_TOKEN_ADMIN": "token_admin",
+        }
+    )
+    try:
+        completed = subprocess.run(  # noqa: S603 - fixed interpreter, no shell
+            [sys.executable, "-m", "pytest", str(witness), "-q"],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=tmp_path,
+            check=False,
+        )
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+

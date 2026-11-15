@@ -134,13 +134,16 @@ def test_branch_b_surviving_grant_must_allow() -> None:
 '''
 
 
-def _step_payload(step: ApiStep) -> dict[str, Any]:
+def _step_payload(step: ApiStep, mode: str) -> dict[str, Any]:
+    body = step.json_body
+    if step.step_id == "reset":
+        body = {"vulnerability_mode": mode}
     return {
         "step_id": step.step_id,
         "method": step.method,
         "path": step.path_template,
         "principal": step.principal_alias,
-        "body": step.json_body,
+        "body": body,
         "extract": step.extract,
     }
 
@@ -162,13 +165,14 @@ def generate_replay_witness(
         branch_b_summary is not None
         and (branch_b_summary.access_allowed or branch_b_summary.state_mutated)
     )
+    mode = str(report.evidence.get("mode", "clean") or "clean")
     branch_a = pprint.pformat(
-        [_step_payload(step) for step in plan.branch_a_steps],
+        [_step_payload(step, mode) for step in plan.branch_a_steps],
         width=88,
         sort_dicts=True,
     )
     branch_b = pprint.pformat(
-        [_step_payload(step) for step in plan.branch_b_steps],
+        [_step_payload(step, mode) for step in plan.branch_b_steps],
         width=88,
         sort_dicts=True,
     )

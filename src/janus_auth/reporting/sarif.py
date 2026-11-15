@@ -134,6 +134,7 @@ def build_sarif(
                 ],
                 "properties": {
                     "plan_id": plan.plan_id,
+                    "mode": report.evidence.get("mode", ""),
                     "transition_family": plan.synthesized.transition_family.value,
                     "probe_type": plan.synthesized.probe_type.value,
                     "verdict": report.verdict.value,

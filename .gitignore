@@ -24,6 +24,9 @@ artifacts/
 .hallmark/
 .superpowers/
 
+# Session exports
+janus-auth-architecture-spec.json
+
 # Editor and OS noise
 .DS_Store
 .idea/

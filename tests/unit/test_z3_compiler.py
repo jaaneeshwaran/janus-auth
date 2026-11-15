@@ -605,7 +605,8 @@ def test_masked_control_uses_masked_query_and_fresh_canary(
     probe = next(
         step for step in masked.branch_a_steps if step.expected_role is ExpectedRole.PROBE
     )
-    assert probe.query == {"masked": "true"}
+    manifest = load_manifest(MANIFEST_PATH)
+    assert probe.query == {manifest.operations["direct_share_revoke"].masked_query: "true"}
     assert masked.canary != base.canary
     assert masked.synthesized.plan_id == base.synthesized.plan_id
     assert all(
@@ -675,3 +676,47 @@ def test_assert_pair_preserved_rejects_divergent_probe(
 
     with pytest.raises(PairPreservationError, match="probe"):
         assert_pair_preserved(broken)
+
+
+def test_compiler_honors_signed_canary_field_and_extractor(
+    oracle: CedarOracle, report: SynthesisReport
+) -> None:
+    manifest = load_manifest(MANIFEST_PATH)
+    manifest.approved = True
+    manifest.approver = "task-6-tests"
+    manifest.approved_at = datetime.now(UTC)
+    manifest.canary_field = "payload_text"
+    manifest.extractors = {**manifest.extractors, "doc_id": "doc_key"}
+    manifest.sign(TEST_SIGNING_SECRET)
+
+    plan = WorkflowCompiler(oracle, signing_secret=TEST_SIGNING_SECRET).compile_pair(
+        manifest, report.pairs[0]
+    )
+
+    create = next(step for step in plan.branch_a_steps if step.step_id == "create-doc")
+    assert create.json_body is not None
+    assert create.json_body["payload_text"] == plan.canary
+    assert "secret_content" not in create.json_body
+    assert create.extract == {"doc_id": "doc_key"}
+
+
+def test_compiler_fails_closed_without_doc_id_extractor(
+    oracle: CedarOracle, report: SynthesisReport
+) -> None:
+    manifest = signed_manifest()
+    manifest.extractors.pop("doc_id")
+    manifest.sign(TEST_SIGNING_SECRET)
+
+    with pytest.raises(ScopeViolationError, match="extractor"):
+        WorkflowCompiler(oracle, signing_secret=TEST_SIGNING_SECRET).compile_pair(
+            manifest, report.pairs[0]
+        )
+
+
+def test_compiler_fails_closed_without_masked_query(oracle: CedarOracle) -> None:
+    manifest = signed_manifest()
+    manifest.operations["direct_share_revoke"].masked_query = None
+    manifest.sign(TEST_SIGNING_SECRET)
+
+    with pytest.raises(ScopeViolationError, match="masked"):
+        WorkflowCompiler(oracle, signing_secret=TEST_SIGNING_SECRET).compile_suite(manifest)

@@ -215,7 +215,11 @@ class WorkflowCompiler:
         self._synthesizer = synthesizer if synthesizer is not None else Z3Synthesizer(oracle)
 
     def compile_suite(self, manifest: ScopeManifest) -> list[CompiledTwinPlan]:
-        """Return the 10 synthesized plans, the cascade realization, and the masked control."""
+        """Return the 10 synthesized plans, the cascade realization, and the masked control.
+
+        Every reset step pins ``vulnerability_mode="clean"``; the runner replaces that
+        body with the mode under test while keeping the compiled sequence unchanged.
+        """
         self._require_approved_manifest(manifest)
         report = self._synthesizer.synthesize_all()
         plans = [self.compile_pair(manifest, pair) for pair in report.pairs]
@@ -279,19 +283,7 @@ class WorkflowCompiler:
                 json_body={"vulnerability_mode": "clean"},
                 reversible=False,
             ),
-            _step(
-                "create-doc",
-                "POST",
-                "/api/v1/documents",
-                _OWNER,
-                ExpectedRole.SETUP,
-                json_body={
-                    "title": "Q4 Plan",
-                    "public_summary": "A quarterly plan",
-                    "secret_content": canary,
-                },
-                extract={"doc_id": "id"},
-            ),
+            self._constructor_step(manifest, canary),
         ]
         probe = self._probe_step(manifest, pair, probe_principal, masked=masked)
         suffix = [
@@ -361,19 +353,7 @@ class WorkflowCompiler:
                 json_body={"vulnerability_mode": "clean"},
                 reversible=False,
             ),
-            _step(
-                "create-doc",
-                "POST",
-                "/api/v1/documents",
-                _OWNER,
-                ExpectedRole.SETUP,
-                json_body={
-                    "title": "Q4 Plan",
-                    "public_summary": "A quarterly plan",
-                    "secret_content": canary,
-                },
-                extract={"doc_id": "id"},
-            ),
+            self._constructor_step(manifest, canary),
         ]
         suffix = [
             _step(
@@ -427,6 +407,29 @@ class WorkflowCompiler:
     ) -> CompiledTwinPlan:
         """Build the masked-200 control from the direct-share-revoke read pair."""
         return self._compile(manifest, pair, f"{pair.plan_id}-masked", masked=True)
+
+    def _constructor_step(self, manifest: ScopeManifest, canary: str) -> ApiStep:
+        """Build the document-constructor step from the signed canary/extractor fields."""
+        if not manifest.canary_field:
+            raise ScopeViolationError("scope manifest declares an empty canary field")
+        doc_id_extractor = manifest.extractors.get("doc_id")
+        if not doc_id_extractor:
+            raise ScopeViolationError(
+                "scope manifest declares no doc_id response extractor"
+            )
+        return _step(
+            "create-doc",
+            "POST",
+            "/api/v1/documents",
+            _OWNER,
+            ExpectedRole.SETUP,
+            json_body={
+                "title": "Q4 Plan",
+                "public_summary": "A quarterly plan",
+                manifest.canary_field: canary,
+            },
+            extract={"doc_id": doc_id_extractor},
+        )
 
     def _family_setup_steps(
         self,
@@ -561,8 +564,10 @@ class WorkflowCompiler:
             body = {"role": "member"}
         elif family is TransitionFamily.OWNERSHIP_TRANSFER:
             body = {"new_owner_id": _DELEGATOR, "retain_old_owner_direct_share": False}
-        else:  # tenant_change has no synthesized concrete pair in the MVP
-            body = {"tenant_id": "globex", "active": True}
+        else:  # pragma: no cover - no synthesized pair reaches this branch
+            raise PairPreservationError(
+                f"no concrete transition body for {family.value}"
+            )
         actor = _ADMIN if family is TransitionFamily.ROLE_DOWNGRADE else _OWNER
         return _step(
             "transition",
@@ -584,7 +589,14 @@ class WorkflowCompiler:
     ) -> ApiStep:
         path = _doc_path(manifest, pair.transition_family)
         if pair.probe_type is ProbeType.PROTECTED_READ:
-            query = {"masked": "true"} if masked else {}
+            query: dict[str, str] = {}
+            if masked:
+                masked_query = _operation(manifest, pair.transition_family).masked_query
+                if not masked_query:
+                    raise ScopeViolationError(
+                        "scope manifest declares no masked query parameter"
+                    )
+                query = {masked_query: "true"}
             return _step(
                 "probe",
                 "GET",

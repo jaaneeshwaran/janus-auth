@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Test and tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local runtime artifacts
+artifacts/
+*.sqlite3
+*.sqlite3-*
+*.db
+.hallmark/
+.superpowers/
+
+# Editor and OS noise
+.DS_Store
+.idea/
+.vscode/

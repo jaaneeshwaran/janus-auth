@@ -11,9 +11,19 @@ import pytest
 from fastapi.testclient import TestClient
 
 from janus_auth.compiler import WorkflowCompiler, load_manifest
-from janus_auth.models import ApiStep, CompiledTwinPlan, ExpectedRole, ScopeManifest
+from janus_auth.models import (
+    ApiStep,
+    CompiledTwinPlan,
+    ExpectedRole,
+    ProbeType,
+    ScopeManifest,
+    TransitionFamily,
+    VerdictKind,
+    ViolationSubtype,
+)
 from janus_auth.oracle import CedarOracle
-from janus_auth.runner import CounterfactualExecutor
+from janus_auth.oracle.adjudicator import adjudicate
+from janus_auth.runner import CounterfactualExecutor, PairPreservingMinimizer
 from janus_auth.security.gatekeeper import SafetyGatekeeper, ScopeViolationError
 from janus_auth.targets.docvault_app import ALL_MODES, Mode, create_app
 
@@ -422,6 +432,11 @@ def test_executor_runs_every_compiled_plan_from_isolated_resets(
         assert evidence.branch_b_reset_epoch > evidence.branch_a_reset_epoch
         assert evidence.branch_a.plan_id == plan.plan_id
         assert evidence.branch_b.plan_id == plan.plan_id
+        report = adjudicate(plan, evidence)
+        assert report.verdict in {
+            VerdictKind.CONFORMS,
+            VerdictKind.CONFORMS_MASKED,
+        }, (plan.plan_id, report)
     assert gatekeeper.requests_used == sum(
         len(plan.branch_a_steps) + len(plan.branch_b_steps)
         for plan in compiled_plans
@@ -510,3 +525,140 @@ def test_executor_refuses_a_host_outside_the_signed_allowlist(
     )
     with pytest.raises(ScopeViolationError, match="allowed_hosts"):
         runner.execute(compiled_plans[0])
+
+
+def _select_plan(
+    plans: list[CompiledTwinPlan],
+    family: TransitionFamily,
+    probe: ProbeType,
+    *,
+    suffix: str | None = None,
+) -> CompiledTwinPlan:
+    return next(
+        plan
+        for plan in plans
+        if plan.synthesized.transition_family is family
+        and plan.synthesized.probe_type is probe
+        and (suffix is None or plan.plan_id.endswith(suffix))
+    )
+
+
+@pytest.mark.parametrize(
+    ("mode", "family", "probe", "suffix", "verdict", "subtype"),
+    [
+        (
+            "vuln_stale_direct_cache",
+            TransitionFamily.DIRECT_SHARE_REVOKE,
+            ProbeType.PROTECTED_READ,
+            None,
+            VerdictKind.CONFIRMED_VIOLATION,
+            ViolationSubtype.BOLA_READ_LEAK,
+        ),
+        (
+            "vuln_group_revocation_ignored",
+            TransitionFamily.GROUP_MEMBER_REMOVE,
+            ProbeType.PROTECTED_READ,
+            None,
+            VerdictKind.CONFIRMED_VIOLATION,
+            ViolationSubtype.STALE_GROUP_CACHE,
+        ),
+        (
+            "vuln_transfer_retains_owner",
+            TransitionFamily.OWNERSHIP_TRANSFER,
+            ProbeType.PROTECTED_READ,
+            None,
+            VerdictKind.CONFIRMED_VIOLATION,
+            ViolationSubtype.FORMER_OWNER_RETENTION,
+        ),
+        (
+            "vuln_broken_delegation_cascade",
+            TransitionFamily.DELEGATION_REVOKE,
+            ProbeType.PROTECTED_READ,
+            "-cascade",
+            VerdictKind.CONFIRMED_VIOLATION,
+            ViolationSubtype.BROKEN_DELEGATION_CASCADE,
+        ),
+        (
+            "vuln_silent_write_on_403",
+            TransitionFamily.DIRECT_SHARE_REVOKE,
+            ProbeType.REVERSIBLE_WRITE,
+            None,
+            VerdictKind.CONFIRMED_VIOLATION,
+            ViolationSubtype.SILENT_WRITE_SIDE_EFFECT,
+        ),
+        (
+            "vuln_over_revocation_regression",
+            TransitionFamily.DIRECT_SHARE_REVOKE,
+            ProbeType.PROTECTED_READ,
+            None,
+            VerdictKind.LEGITIMATE_ACCESS_REGRESSION,
+            ViolationSubtype.OVER_REVOCATION_REGRESSION,
+        ),
+    ],
+)
+def test_pipeline_detects_each_seeded_defect(
+    client: TestClient,
+    signed_manifest: ScopeManifest,
+    compiled_plans: list[CompiledTwinPlan],
+    mode: Mode,
+    family: TransitionFamily,
+    probe: ProbeType,
+    suffix: str | None,
+    verdict: VerdictKind,
+    subtype: ViolationSubtype,
+) -> None:
+    plan = _select_plan(compiled_plans, family, probe, suffix=suffix)
+    runner = CounterfactualExecutor(
+        client,
+        SafetyGatekeeper(signed_manifest, secret=TEST_SIGNING_SECRET),
+        mode=mode,
+    )
+    report = adjudicate(plan, runner.execute(plan))
+    assert report.verdict is verdict
+    assert report.subtype is subtype
+    assert report.reproduction_verified is True
+    assert report.branch_a_summary is not None
+
+
+def test_minimizer_strips_injected_noise_from_a_real_silent_write_witness(
+    client: TestClient,
+    signed_manifest: ScopeManifest,
+    compiled_plans: list[CompiledTwinPlan],
+) -> None:
+    plan = _select_plan(
+        compiled_plans,
+        TransitionFamily.DIRECT_SHARE_REVOKE,
+        ProbeType.REVERSIBLE_WRITE,
+    )
+    noise = [
+        ApiStep(
+            step_id=f"noise-{index}",
+            method="GET",
+            path_template="/api/v1/documents",
+            principal_alias="ada",
+            expected_role=ExpectedRole.SETUP,
+            reversible=True,
+        )
+        for index in range(6)
+    ]
+    noisy = plan.model_copy(
+        update={
+            "branch_a_steps": [*plan.branch_a_steps, *noise],
+            "branch_b_steps": [*plan.branch_b_steps, *noise],
+        }
+    )
+
+    def replay(candidate: CompiledTwinPlan):
+        runner = CounterfactualExecutor(
+            client,
+            SafetyGatekeeper(signed_manifest, secret=TEST_SIGNING_SECRET),
+            mode="vuln_silent_write_on_403",
+        )
+        return adjudicate(candidate, runner.execute(candidate))
+
+    result = PairPreservingMinimizer(replay).minimize(noisy)
+    assert result.verdict is VerdictKind.CONFIRMED_VIOLATION
+    assert result.subtype is ViolationSubtype.SILENT_WRITE_SIDE_EFFECT
+    assert result.reproduction_verified is True
+    assert {f"noise-{index}" for index in range(6)} <= set(result.removed_step_ids)
+    assert result.reduction_ratio >= 0.35

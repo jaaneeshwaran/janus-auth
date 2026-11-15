@@ -5,10 +5,14 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-from collections.abc import Callable
+import socket
+import sqlite3
+from collections.abc import Callable, Sequence
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
+import httpx
 import pytest
 from pydantic import ValidationError
 
@@ -41,6 +45,15 @@ from janus_auth.models import (
     TransitionFamily,
     VerdictKind,
     ViolationSubtype,
+)
+from janus_auth.security import (
+    BudgetExhaustedError,
+    RateLimitExceededError,
+    Redactor,
+    SafetyGatekeeper,
+    ScopeViolationError,
+    SSRFBlockedError,
+    TraceStore,
 )
 
 SECRET = "test-signing-secret"  # noqa: S105 - test-only value
@@ -697,3 +710,621 @@ def test_config_dataclass_is_frozen() -> None:
 def test_config_direct_construction_validates(kwargs: dict[str, object]) -> None:
     with pytest.raises(ValueError):
         Settings(**kwargs)  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Safety gatekeeper (Task 3)
+# ---------------------------------------------------------------------------
+
+SAMPLE_JWT = (  # noqa: S105 - synthetic test-only token
+    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJiZWEifQ.c2lnbmF0dXJl"
+)
+BEARER_TOKEN = "opaque-test-bearer-value"  # noqa: S105 - test-only value
+TRACE_PASSPHRASE = "test-trace-passphrase"  # noqa: S105 - test-only value
+
+
+def make_signed_manifest(**overrides: object) -> ScopeManifest:
+    return make_manifest(**overrides).sign(SECRET)
+
+
+def fixed_resolver(*addresses: str) -> Callable[[str], Sequence[str]]:
+    def resolve(_host: str) -> Sequence[str]:
+        return addresses
+
+    return resolve
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _fail_socket(*args: object, **kwargs: object) -> None:
+    raise AssertionError("network socket opened before gatekeeper rejection")
+
+
+def test_gatekeeper_requires_valid_signature_and_never_leaks_secret() -> None:
+    with pytest.raises(ScopeViolationError) as exc_info:
+        SafetyGatekeeper(make_manifest(), secret=SECRET)
+    assert SECRET not in str(exc_info.value)
+
+    with pytest.raises(ScopeViolationError) as exc_info:
+        SafetyGatekeeper(make_signed_manifest(), secret="wrong-secret")  # noqa: S106
+    assert SECRET not in str(exc_info.value)
+
+    with pytest.raises(ScopeViolationError):
+        SafetyGatekeeper(make_signed_manifest(), secret="")
+
+
+def test_gatekeeper_rejects_expired_manifest() -> None:
+    expired = make_manifest(expires_at=datetime.now(UTC) - timedelta(seconds=1)).sign(SECRET)
+    with pytest.raises(ScopeViolationError):
+        SafetyGatekeeper(expired, secret=SECRET)
+
+
+def test_gatekeeper_accepts_signed_manifest_without_enforcing_approval() -> None:
+    # Approval is a compiler/runner gate; the gatekeeper only verifies the signature.
+    manifest = make_signed_manifest(approved=False)
+    gatekeeper = SafetyGatekeeper(
+        manifest, secret=SECRET, resolver=fixed_resolver("127.0.0.1")
+    )
+    assert gatekeeper.manifest.approved is False
+    gatekeeper.validate_url("http://127.0.0.1/health")
+
+
+@pytest.mark.parametrize(
+    ("url", "allowed_hosts"),
+    [
+        (
+            "http://169.254.169.254/latest/meta-data/",
+            ["127.0.0.1", "localhost", "testserver", "169.254.169.254"],
+        ),
+        ("http://evil.example.com/api", ["127.0.0.1", "localhost", "testserver"]),
+        ("file:///etc/passwd", ["127.0.0.1", "localhost", "testserver"]),
+    ],
+)
+def test_gatekeeper_blocks_acceptance_urls_before_socket(
+    monkeypatch: pytest.MonkeyPatch,
+    url: str,
+    allowed_hosts: list[str],
+) -> None:
+    manifest = make_signed_manifest(allowed_hosts=allowed_hosts)
+    gatekeeper = SafetyGatekeeper(
+        manifest,
+        secret=SECRET,
+        resolver=fixed_resolver("169.254.169.254"),
+    )
+    monkeypatch.setattr(socket, "socket", _fail_socket)
+    with pytest.raises(ScopeViolationError):
+        gatekeeper.validate_request("GET", url)
+
+
+def test_gatekeeper_blocks_allowlisted_metadata_ip_at_ssrf_layer() -> None:
+    manifest = make_signed_manifest(
+        allowed_hosts=["127.0.0.1", "localhost", "testserver", "169.254.169.254"]
+    )
+    gatekeeper = SafetyGatekeeper(
+        manifest,
+        secret=SECRET,
+        resolver=fixed_resolver("169.254.169.254"),
+    )
+    with pytest.raises(SSRFBlockedError):
+        gatekeeper.validate_url("http://169.254.169.254/latest/meta-data/")
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "169.254.169.254",
+        "169.254.10.10",
+        "224.0.0.1",
+        "0.0.0.0",  # noqa: S104 - assertion that the unspecified range is blocked
+        "::",
+        "::ffff:169.254.169.254",
+    ],
+)
+def test_gatekeeper_blocks_link_local_multicast_and_unspecified(address: str) -> None:
+    manifest = make_signed_manifest(
+        allowed_hosts=["127.0.0.1", "localhost", "testserver", "internal.example"]
+    )
+    gatekeeper = SafetyGatekeeper(
+        manifest, secret=SECRET, resolver=fixed_resolver(address)
+    )
+    with pytest.raises(SSRFBlockedError):
+        gatekeeper.validate_url("http://internal.example/resource")
+
+
+@pytest.mark.parametrize("url", ["ftp://example.com/x", "gopher://example.com/x"])
+def test_gatekeeper_rejects_non_http_schemes(url: str) -> None:
+    gatekeeper = SafetyGatekeeper(
+        make_signed_manifest(), secret=SECRET, resolver=fixed_resolver("127.0.0.1")
+    )
+    with pytest.raises(ScopeViolationError):
+        gatekeeper.validate_url(url)
+
+
+def test_gatekeeper_allows_loopback() -> None:
+    gatekeeper = SafetyGatekeeper(
+        make_signed_manifest(), secret=SECRET, resolver=fixed_resolver("127.0.0.1")
+    )
+    gatekeeper.validate_url("http://127.0.0.1:8080/health")
+
+
+def test_gatekeeper_skips_resolution_for_testserver() -> None:
+    def exploding_resolver(_host: str) -> Sequence[str]:
+        raise AssertionError("testserver must not be resolved")
+
+    gatekeeper = SafetyGatekeeper(
+        make_signed_manifest(), secret=SECRET, resolver=exploding_resolver
+    )
+    gatekeeper.validate_url("http://testserver/api/v1/documents")
+
+
+def test_gatekeeper_resolution_failure_is_ssrf_blocked() -> None:
+    def failing_resolver(_host: str) -> Sequence[str]:
+        raise OSError("no such host")
+
+    gatekeeper = SafetyGatekeeper(
+        make_signed_manifest(allowed_hosts=["internal.example"]),
+        secret=SECRET,
+        resolver=failing_resolver,
+    )
+    with pytest.raises(SSRFBlockedError):
+        gatekeeper.validate_url("http://internal.example/api")
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "allowed"),
+    [
+        ("DELETE", "/api/v1/documents/doc_1/shares/bea", True),
+        ("DELETE", "/api/v1/documents/doc_1/shares/bea/", True),
+        ("DELETE", "/api/v1/documents/doc_1/shares/bea?masked=1", True),
+        ("DELETE", "/api/v1/admin/reset", True),
+        ("DELETE", "/api/v1/documents/doc_1", False),
+        ("DELETE", "/api/v1/documents/doc_1/shares/bea/extra", False),
+        ("DELETE", "/api/v1/documents/doc_1/shares", False),
+        ("PUT", "/api/v1/documents/doc_1", True),
+        ("PATCH", "/api/v1/documents/doc_1", True),
+        ("POST", "/api/v1/documents/doc_1", True),
+        ("GET", "/api/v1/documents/doc_1", True),
+    ],
+)
+def test_gatekeeper_delete_policy_truth_table(
+    method: str, path: str, allowed: bool
+) -> None:
+    manifest = make_signed_manifest(
+        transition_endpoints=[
+            TransitionEndpoint(
+                family=TransitionFamily.DIRECT_SHARE_REVOKE,
+                method="DELETE",
+                path_template="/api/v1/documents/{doc_id}/shares/{user_id}",
+            )
+        ],
+        reset_endpoint="/api/v1/admin/reset",
+    )
+    gatekeeper = SafetyGatekeeper(
+        manifest, secret=SECRET, resolver=fixed_resolver("127.0.0.1")
+    )
+    url = "http://testserver" + path
+    if allowed:
+        gatekeeper.validate_url(url, method)
+    else:
+        with pytest.raises(ScopeViolationError):
+            gatekeeper.validate_url(url, method)
+
+
+def test_gatekeeper_delete_policy_requires_transition_method_match() -> None:
+    manifest = make_signed_manifest(
+        transition_endpoints=[
+            TransitionEndpoint(
+                family=TransitionFamily.DIRECT_SHARE_REVOKE,
+                method="POST",
+                path_template="/api/v1/documents/{doc_id}/shares/{user_id}",
+            )
+        ],
+        reset_endpoint=None,
+    )
+    gatekeeper = SafetyGatekeeper(
+        manifest, secret=SECRET, resolver=fixed_resolver("127.0.0.1")
+    )
+    with pytest.raises(ScopeViolationError):
+        gatekeeper.validate_url(
+            "http://testserver/api/v1/documents/doc_1/shares/bea", "DELETE"
+        )
+
+
+def test_gatekeeper_allows_destructive_when_declared() -> None:
+    manifest = make_signed_manifest(allow_destructive=True, reset_endpoint=None)
+    gatekeeper = SafetyGatekeeper(
+        manifest, secret=SECRET, resolver=fixed_resolver("127.0.0.1")
+    )
+    gatekeeper.validate_url("http://testserver/api/v1/documents/doc_1", "DELETE")
+
+
+def test_gatekeeper_matches_absolute_reset_endpoint() -> None:
+    manifest = make_signed_manifest(
+        reset_endpoint="http://testserver/api/v1/admin/reset?scope=all"
+    )
+    gatekeeper = SafetyGatekeeper(
+        manifest, secret=SECRET, resolver=fixed_resolver("127.0.0.1")
+    )
+    gatekeeper.validate_url("http://testserver/api/v1/admin/reset", "DELETE")
+
+
+def test_gatekeeper_rate_limit_uses_injected_clock() -> None:
+    clock = FakeClock()
+    manifest = make_signed_manifest(rate_limit_rps=2.0, max_requests=100)
+    gatekeeper = SafetyGatekeeper(
+        manifest,
+        secret=SECRET,
+        clock=clock,
+        resolver=fixed_resolver("127.0.0.1"),
+    )
+    url = "http://127.0.0.1/resource"
+    gatekeeper.validate_request("GET", url)
+    gatekeeper.validate_request("GET", url)
+    with pytest.raises(RateLimitExceededError):
+        gatekeeper.validate_request("GET", url)
+
+    clock.now = 0.5
+    gatekeeper.validate_request("GET", url)
+    with pytest.raises(RateLimitExceededError):
+        gatekeeper.validate_request("GET", url)
+
+
+def test_gatekeeper_enforces_budget_after_url_checks_and_before_socket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FakeClock()
+    manifest = make_signed_manifest(max_requests=2, rate_limit_rps=1000.0)
+    gatekeeper = SafetyGatekeeper(
+        manifest,
+        secret=SECRET,
+        clock=clock,
+        resolver=fixed_resolver("127.0.0.1"),
+    )
+    url = "http://127.0.0.1/resource"
+    for _ in range(10):
+        gatekeeper.validate_url(url)
+    assert gatekeeper.requests_used == 0
+
+    gatekeeper.validate_request("GET", url)
+    gatekeeper.validate_request("GET", url)
+    assert gatekeeper.requests_used == 2
+
+    monkeypatch.setattr(socket, "socket", _fail_socket)
+    with pytest.raises(BudgetExhaustedError):
+        gatekeeper.validate_request("GET", url)
+
+
+def test_gatekeeper_rejected_request_does_not_consume_budget() -> None:
+    gatekeeper = SafetyGatekeeper(
+        make_signed_manifest(max_requests=1),
+        secret=SECRET,
+        resolver=fixed_resolver("127.0.0.1"),
+    )
+    with pytest.raises(ScopeViolationError):
+        gatekeeper.validate_request("GET", "http://evil.example.com/api")
+    assert gatekeeper.requests_used == 0
+    gatekeeper.validate_request("GET", "http://127.0.0.1/resource")
+    assert gatekeeper.requests_used == 1
+
+
+def test_gatekeeper_and_client_do_not_follow_redirects() -> None:
+    gatekeeper = SafetyGatekeeper(
+        make_signed_manifest(), secret=SECRET, resolver=fixed_resolver("127.0.0.1")
+    )
+    redirect_target = "http://evil.example.com/api"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url == httpx.URL("http://testserver/api")
+        return httpx.Response(302, headers={"location": redirect_target})
+
+    transport = httpx.MockTransport(handler)
+    with httpx.Client(transport=transport, follow_redirects=False) as client:
+        gatekeeper.validate_request("GET", "http://testserver/api")
+        response = client.get("http://testserver/api")
+
+    assert response.status_code == 302
+    assert response.headers["location"] == redirect_target
+    # If the redirect were followed, the gatekeeper would reject the new host.
+    with pytest.raises(ScopeViolationError):
+        gatekeeper.validate_url(redirect_target)
+
+
+# ---------------------------------------------------------------------------
+# Redactor (Task 3)
+# ---------------------------------------------------------------------------
+
+
+def test_redactor_scrubs_sensitive_headers_case_insensitively() -> None:
+    payload: dict[str, object] = {
+        "Authorization": f"Bearer {SAMPLE_JWT}",
+        "authorization": BEARER_TOKEN,
+        "Proxy-Authorization": "basic abc",
+        "Cookie": "session=abc",
+        "SET-COOKIE": "session=def",
+        "X-Api-Key": "key-value",
+        "Content-Type": "application/json",
+    }
+    sanitized = Redactor.sanitize_trace(payload)
+
+    for key in (
+        "Authorization",
+        "authorization",
+        "Proxy-Authorization",
+        "Cookie",
+        "SET-COOKIE",
+        "X-Api-Key",
+    ):
+        assert sanitized[key] == "Bearer [REDACTED]"
+    assert sanitized["Content-Type"] == "application/json"
+
+
+def test_redactor_scrubs_jwts_and_bearer_tokens_recursively() -> None:
+    payload: dict[str, object] = {
+        "body": {"note": f"jwt={SAMPLE_JWT}", "auth": f"Bearer {BEARER_TOKEN}"},
+        "items": [SAMPLE_JWT, ("tuple", f"Bearer {BEARER_TOKEN}")],
+        "safe": "no credentials here",
+    }
+    sanitized = Redactor.sanitize_trace(payload)
+
+    rendered = json.dumps(sanitized)
+    assert SAMPLE_JWT not in rendered
+    assert BEARER_TOKEN not in rendered
+    assert "Bearer [REDACTED]" in rendered
+    assert isinstance(sanitized["items"][1], tuple)
+    assert sanitized["safe"] == "no credentials here"
+
+
+def test_redactor_is_idempotent() -> None:
+    payload = {
+        "headers": {"Authorization": f"Bearer {SAMPLE_JWT}"},
+        "note": f"token {SAMPLE_JWT}",
+        "opaque": f"Bearer {BEARER_TOKEN}",
+    }
+    once = Redactor.sanitize_trace(payload)
+    twice = Redactor.sanitize_trace(once)
+    assert twice == once
+    assert once["headers"]["Authorization"] == "Bearer [REDACTED]"
+
+    # A bare "Bearer <JWT>" inside a non-header field must also stabilise after one pass.
+    bare_bearer = Redactor.sanitize_trace({"note": f"Bearer {SAMPLE_JWT}"})
+    assert bare_bearer == {"note": "Bearer [REDACTED]"}
+    assert Redactor.sanitize_trace(bare_bearer) == bare_bearer
+
+
+def test_redactor_header_helper() -> None:
+    redacted = Redactor.redact_headers(
+        {
+            "Authorization": f"Bearer {SAMPLE_JWT}",
+            "X-Api-Key": "secret-key-value",
+            "Accept": "application/json",
+        }
+    )
+    assert redacted == {
+        "Authorization": "Bearer [REDACTED]",
+        "X-Api-Key": "Bearer [REDACTED]",
+        "Accept": "application/json",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Encrypted trace store (Task 3)
+# ---------------------------------------------------------------------------
+
+
+def make_trace() -> dict[str, object]:
+    return {
+        "request": {
+            "headers": {"Authorization": f"Bearer {SAMPLE_JWT}"},
+            "body": f"jwt={SAMPLE_JWT}",
+        },
+        "response": {"note": f"seen Bearer {BEARER_TOKEN}"},
+    }
+
+
+def test_trace_store_round_trips_redacted_encrypted_trace(tmp_path: Path) -> None:
+    db_path = tmp_path / "janus_traces.sqlite3"
+    with TraceStore(
+        db_path, encryption_key=TRACE_PASSPHRASE, retention_days=7
+    ) as store:
+        store.record_run(
+            "run-1",
+            "2026-11-15T00:00:00+00:00",
+            POLICY_SHA,
+            None,
+            "http://testserver",
+            total_requests=3,
+        )
+        store.record_verdict(
+            "verdict-1",
+            "run-1",
+            "plan-1",
+            TransitionFamily.DIRECT_SHARE_REVOKE,
+            ProbeType.PROTECTED_READ,
+            VerdictKind.CONFIRMED_VIOLATION,
+            ViolationSubtype.BOLA_READ_LEAK,
+            make_trace(),
+        )
+        row = store.get_verdict("verdict-1")
+        assert row is not None
+        assert row["run_id"] == "run-1"
+        assert row["transition_family"] == "direct_share_revoke"
+        assert row["probe_type"] == "protected_read"
+        assert row["verdict"] == "CONFIRMED_VIOLATION"
+        assert row["violation_subtype"] == "BOLA_READ_LEAK"
+        trace = row["trace"]
+        assert isinstance(trace, dict)
+        assert SAMPLE_JWT not in json.dumps(trace)
+        assert BEARER_TOKEN not in json.dumps(trace)
+        assert trace["request"]["headers"]["Authorization"] == "Bearer [REDACTED]"
+
+    with sqlite3.connect(db_path) as connection:
+        raw_blob = connection.execute(
+            "SELECT encrypted_trace_blob FROM verdicts WHERE verdict_id = ?",
+            ("verdict-1",),
+        ).fetchone()[0]
+    assert isinstance(raw_blob, bytes)
+    assert SAMPLE_JWT.encode() not in raw_blob
+    assert BEARER_TOKEN.encode() not in raw_blob
+    assert b"Authorization" not in raw_blob
+
+    all_bytes = b"".join(
+        path.read_bytes() for path in sorted(tmp_path.iterdir()) if path.is_file()
+    )
+    assert SAMPLE_JWT.encode() not in all_bytes
+    assert BEARER_TOKEN.encode() not in all_bytes
+    assert b"Bearer [REDACTED]" not in all_bytes
+
+
+def test_trace_store_reopens_with_configured_key(tmp_path: Path) -> None:
+    db_path = tmp_path / "janus_traces.sqlite3"
+    with TraceStore(db_path, encryption_key=TRACE_PASSPHRASE) as store:
+        store.record_verdict(
+            "verdict-1",
+            "run-1",
+            "plan-1",
+            TransitionFamily.DIRECT_SHARE_REVOKE,
+            ProbeType.PROTECTED_READ,
+            VerdictKind.CONFORMS,
+            ViolationSubtype.NONE,
+            make_trace(),
+        )
+
+    with TraceStore(db_path, encryption_key=TRACE_PASSPHRASE) as store:
+        row = store.get_verdict("verdict-1")
+    assert row is not None
+    assert row["verdict"] == "CONFORMS"
+    assert SAMPLE_JWT not in json.dumps(row["trace"])
+
+
+def test_trace_store_warns_on_ephemeral_key(tmp_path: Path) -> None:
+    db_path = tmp_path / "janus_traces.sqlite3"
+    with pytest.warns(UserWarning, match="JANUS_TRACE_ENCRYPTION_KEY"):
+        store = TraceStore(db_path)
+
+    with store:
+        store.record_verdict(
+            "verdict-1",
+            "run-1",
+            "plan-1",
+            TransitionFamily.DIRECT_SHARE_REVOKE,
+            ProbeType.PROTECTED_READ,
+            VerdictKind.CONFORMS,
+            ViolationSubtype.NONE,
+            make_trace(),
+        )
+        row = store.get_verdict("verdict-1")
+    assert row is not None
+    assert SAMPLE_JWT not in json.dumps(row["trace"])
+
+
+def test_trace_store_purges_verdicts_older_than_retention(tmp_path: Path) -> None:
+    db_path = tmp_path / "janus_traces.sqlite3"
+    old_timestamp = (datetime.now(UTC) - timedelta(days=30)).isoformat(
+        timespec="microseconds"
+    )
+    recent_timestamp = datetime.now(UTC).isoformat(timespec="microseconds")
+
+    with TraceStore(
+        db_path, encryption_key=TRACE_PASSPHRASE, retention_days=7
+    ) as store:
+        for verdict_id, created_at in (
+            ("old", old_timestamp),
+            ("recent", recent_timestamp),
+        ):
+            store.record_verdict(
+                verdict_id,
+                "run-1",
+                "plan-1",
+                TransitionFamily.DIRECT_SHARE_REVOKE,
+                ProbeType.PROTECTED_READ,
+                VerdictKind.CONFORMS,
+                ViolationSubtype.NONE,
+                make_trace(),
+                created_at=created_at,
+            )
+
+    with TraceStore(
+        db_path, encryption_key=TRACE_PASSPHRASE, retention_days=7
+    ) as store:
+        assert store.get_verdict("old") is None
+        assert store.get_verdict("recent") is not None
+
+
+def test_trace_store_schema_matches_spec(tmp_path: Path) -> None:
+    db_path = tmp_path / "janus_traces.sqlite3"
+    with TraceStore(db_path, encryption_key=TRACE_PASSPHRASE):
+        pass
+
+    with sqlite3.connect(db_path) as connection:
+        run_columns = [
+            row[1] for row in connection.execute("PRAGMA table_info(runs)")
+        ]
+        verdict_columns = [
+            row[1] for row in connection.execute("PRAGMA table_info(verdicts)")
+        ]
+        journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+
+    assert run_columns == [
+        "run_id",
+        "started_at",
+        "policy_sha256",
+        "manifest_sha256",
+        "target_url",
+        "total_requests",
+    ]
+    assert verdict_columns == [
+        "verdict_id",
+        "run_id",
+        "plan_id",
+        "transition_family",
+        "probe_type",
+        "verdict",
+        "violation_subtype",
+        "encrypted_trace_blob",
+        "created_at",
+    ]
+    assert journal_mode.lower() == "wal"
+
+
+def test_trace_store_uses_parameterized_sql(tmp_path: Path) -> None:
+    db_path = tmp_path / "janus_traces.sqlite3"
+    hostile_run_id = "run-1'); DROP TABLE verdicts; --"
+    with TraceStore(db_path, encryption_key=TRACE_PASSPHRASE) as store:
+        store.record_run(
+            hostile_run_id,
+            "2026-11-15T00:00:00+00:00",
+            POLICY_SHA,
+            None,
+            "http://testserver",
+        )
+        store.record_verdict(
+            "verdict-1",
+            hostile_run_id,
+            "plan-1",
+            TransitionFamily.DIRECT_SHARE_REVOKE,
+            ProbeType.PROTECTED_READ,
+            VerdictKind.CONFORMS,
+            ViolationSubtype.NONE,
+            make_trace(),
+        )
+        assert store.get_verdict("verdict-1")["run_id"] == hostile_run_id
+        fetched = store.fetch_verdicts(hostile_run_id)
+        assert [row["verdict_id"] for row in fetched] == ["verdict-1"]
+
+    with sqlite3.connect(db_path) as connection:
+        count = connection.execute("SELECT COUNT(*) FROM verdicts").fetchone()[0]
+    assert count == 1
+
+
+def test_trace_store_close_is_idempotent(tmp_path: Path) -> None:
+    store = TraceStore(tmp_path / "janus_traces.sqlite3", encryption_key=TRACE_PASSPHRASE)
+    store.close()
+    store.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        store.get_verdict("verdict-1")

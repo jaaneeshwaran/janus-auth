@@ -1,0 +1,4 @@
+# Reference fixtures for the DocVault target live here (created by Tasks 4-6):
+#   docvault.cedar          authoritative Cedar policy
+#   docvault_manifest.yaml  signed scope + operation-mapping manifest
+#   docvault_openapi.json   OpenAPI 3.1 description of the target API

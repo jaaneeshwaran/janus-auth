@@ -1,0 +1,57 @@
+name: Bug report
+description: Report a defect in Janus-Auth
+title: "fix: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please include enough detail to reproduce the behavior.
+        Do not include real credentials, tokens, or customer data.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior and the expected behavior.
+      placeholder: The runner accepted a manifest that should have been rejected.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Commands, manifest snippets, and a minimal target if relevant.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `janus-auth --help` or the installed package version.
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python version, and install method.
+      placeholder: Ubuntu 24.04, Python 3.12.4, pip install -e .
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or artifacts
+      description: Paste relevant output. Remove secrets first.
+      render: text
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I ran the relevant tests.
+        - label: I removed secrets and customer data from this report.

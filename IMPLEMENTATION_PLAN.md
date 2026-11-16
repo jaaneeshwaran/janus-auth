@@ -1,8 +1,8 @@
 # Janus-Auth — Normalized Implementation Plan (SDD Execution Copy)
 
-**Binding specification:** `/home/Jaan/Documents/CYBER PROJECT 1/(Step5)janus_auth_architecture_and_implementation_specification.md` (1,238 lines). This plan is the execution copy; the specification remains the authority where they differ. Every conflict is ruled on below.
+**Binding specification:** `PROJECT_SPEC.md` (the authority where this plan differs). Every conflict is ruled on below.
 
-**Repository:** `/home/Jaan/Documents/CYBER PROJECT 1/janus-auth`
+**Repository:** this repository
 **Runtime:** Python 3.12.2, local `.venv`, `pip install -e ".[dev]"`
 **Execution mode:** continuous, 13 tasks, per-task review, hard phase gates, final whole-branch review, then the landing page.
 **Hallmark:** landing page only (Phase 5), never for the Python CLI, SARIF, JSON, or Markdown artifacts.
@@ -48,7 +48,7 @@
 4. For each task: record `BASE=$(git rev-parse HEAD)`, generate the task brief, dispatch one implementer, write the report file, package the diff, dispatch one task reviewer, run the fix loop, append the ledger, commit.
 5. Never dispatch two implementers in parallel. Never let an implementer dispatch a reviewer. The controller owns review.
 6. Phase gates: after Tasks 1–3, 4–6, 7, 8–10, and 11–13 run the phase test command plus `ruff` and `mypy`; a failing gate blocks the next phase.
-7. Ledger: `.superpowers/sdd/janus-auth/progress.md`, first line `# SDD ledger — plan: /home/Jaan/.opencode/plan/janus-auth.md`.
+7. Ledger: `.superpowers/sdd/janus-auth/progress.md` (the SDD ledger).
 8. Final: whole-branch review on the strongest available model, then the spec-to-code compliance audit, then the landing page.
 
 ## Task 1: Repository Scaffolding, Packaging, and Tooling

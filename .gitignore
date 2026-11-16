@@ -23,6 +23,22 @@ artifacts/
 *.db
 .hallmark/
 .superpowers/
+janus_traces.sqlite3*
+
+# Local secrets and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+id_rsa*
+.netrc
+credentials*.json
+service-account*.json
+secrets/
 
 # Session exports
 janus-auth-architecture-spec.json
@@ -31,3 +47,4 @@ janus-auth-architecture-spec.json
 .DS_Store
 .idea/
 .vscode/
+*.swp

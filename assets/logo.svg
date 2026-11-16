@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Janus-Auth logo">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#142435"/>
+      <stop offset="1" stop-color="#0b1623"/>
+    </linearGradient>
+    <linearGradient id="coral" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff9478"/>
+      <stop offset="1" stop-color="#f05d3f"/>
+    </linearGradient>
+  </defs>
+  <rect x="12" y="12" width="488" height="488" rx="124" fill="url(#tile)"/>
+  <rect x="12" y="12" width="488" height="488" rx="124" fill="none" stroke="#ffffff" stroke-opacity="0.14" stroke-width="3"/>
+  <path d="M150 380V210c0-58 47-105 106-105s106 47 106 105v170" fill="none" stroke="url(#coral)" stroke-width="30" stroke-linecap="round"/>
+  <path d="M256 150v230" fill="none" stroke="#ffffff" stroke-width="30" stroke-linecap="round"/>
+  <circle cx="256" cy="150" r="25" fill="#ffffff"/>
+  <circle cx="256" cy="150" r="11" fill="#0b1623"/>
+</svg>

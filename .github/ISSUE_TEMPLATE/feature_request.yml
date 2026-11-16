@@ -1,0 +1,37 @@
+name: Feature request
+description: Suggest an improvement to Janus-Auth
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Janus-Auth is intentionally narrow. Please describe the problem before the solution.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is difficult or impossible today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What should change? Include the evidence model or CLI surface if relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches, or why this should stay out of scope.
+    validations:
+      required: false
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - label: This change preserves the gatekeeper and pair-preservation invariants.
+        - label: This change does not require a new runtime dependency.

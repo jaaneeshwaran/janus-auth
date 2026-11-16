@@ -239,7 +239,6 @@ janus-auth/
 │   └── cli.py               # Typer command surface
 ├── tests/                   # Unit, integration, and security tests
 ├── PROJECT_SPEC.md          # Binding specification
-├── IMPLEMENTATION_PLAN.md   # Normalized execution plan
 └── spec-compliance/         # Requirement-by-requirement audit
 ```
 

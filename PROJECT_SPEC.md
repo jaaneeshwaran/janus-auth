@@ -16,7 +16,7 @@ Where the seed report left design or operational choices open, the following con
 
 1. **Primary Implementation Language & Runtime:** Python `3.12+` (compatible with `3.12`, `3.13`, and `3.14`) managed with standard `pyproject.toml` and `pip` / `uv`, so all core dependencies (`z3-solver==5.4.1.0`, `cedarpy==4.12.2`, `fastapi==0.163.0`, `pydantic==2.14.3`, `schemathesis==4.33.3`) install cleanly from pre-built wheels without requiring a Rust or C++ compiler during build.
 2. **Authoritative Policy Language:** **Cedar Policy Language** (via `cedarpy==4.12.2`) is selected as the authoritative human-approved oracle evaluation engine, paired with a direct **Z3 SMT encoding** (`z3-solver==5.4.1.0`) of the bounded ReBAC/ABAC support algebra for counterfactual state synthesis.
-3. **Self-Contained Evaluation Targets:** Rather than requiring external heavy Docker Compose stacks (like a full PostgreSQL + Redis + Celery Paperless-ngx deployment) to run unit and integration tests in OpenCode's local environment, the repository ships with a **Self-Contained Multi-Mode Target Benchmark Server** (`janus_auth.targets. docvault_app`) built on FastAPI + SQLite in-memory/file resets. This server models Paperless-ngx and Gitea permission semantics (owners, direct user shares, group grants, one-hop delegations, explicit denies, and tenant boundaries) and provides **7 switchable vulnerability modes** (`clean`, `vuln_stale_direct_cache`, `vuln_group_revocation_ignored`, `vuln_transfer_retains_owner`, `vuln_broken_delegation_cascade`, `vuln_silent_write_on_403`, `vuln_over_revocation_regression`) plus a **Paperless-ngx / VAmPI external HTTP adapter** for optional container testing.
+3. **Self-Contained Evaluation Targets:** Rather than requiring external heavy Docker Compose stacks (like a full PostgreSQL + Redis + Celery Paperless-ngx deployment) to run unit and integration tests in a local build environment, the repository ships with a **Self-Contained Multi-Mode Target Benchmark Server** (`janus_auth.targets. docvault_app`) built on FastAPI + SQLite in-memory/file resets. This server models Paperless-ngx and Gitea permission semantics (owners, direct user shares, group grants, one-hop delegations, explicit denies, and tenant boundaries) and provides **7 switchable vulnerability modes** (`clean`, `vuln_stale_direct_cache`, `vuln_group_revocation_ignored`, `vuln_transfer_retains_owner`, `vuln_broken_delegation_cascade`, `vuln_silent_write_on_403`, `vuln_over_revocation_regression`) plus a **Paperless-ngx / VAmPI external HTTP adapter** for optional container testing.
 4. **Role of AI / LLMs:** In accordance with the seed report's finding that LLMs must *never* be authoritative oracles, the core compiler, runner, adjudicator, and minimizer require **zero LLM API keys** and run 100% deterministically offline. An optional heuristic + pluggable LLM mapper (`janus-auth propose-mapping`) is included to draft initial OpenAPI-to-Policy operation mappings, which must pass human approval (`approved: true` + SHA-256 policy signature) before execution.
 5. **Storage & Trace Persistence:** Execution traces, counterfactual witnesses, and audit logs are stored locally in **SQLite** (with WAL mode enabled) and exported as self-contained **JSONL / SARIF 2.1.0 / Standalone Python Replay Scripts**, with sensitive headers/tokens automatically redacted and optionally encrypted at rest via `cryptography==50.0.2` (Fernet AES-128-CBC + HMAC-SHA256).
 
@@ -789,7 +789,7 @@ clean:
 
 ## 16.1 Scope Split: MVP vs. v1 vs. Later
 
-- **MVP (Phases 0–5, buildable in 4–6 weeks by one engineer / immediately executable by OpenCode):**
+- **MVP (Phases 0–5, buildable in 4–6 weeks by one engineer / immediately executable by an engineering agent):**
   - Core Pydantic domain models, `SafetyGatekeeper` (SSRF, allowlist, no-redirect, rate/budget limits), `Redactor`, and encrypted SQLite trace store.
   - Authoritative Cedar policy evaluation (`cedarpy`) + Z3 SMT Counterfactual Twin Synthesizer (`z3-solver`) across all 6 transition families, 4 principal classes, and 2 probe types.
   - Self-contained `DocVault` FastAPI multi-mode benchmark target supporting all 7 modes (`clean` + 6 distinct lifecycle bug/regression modes).
@@ -1058,7 +1058,7 @@ janus-auth demo --out-dir artifacts/demo/
 The following content must be placed in `AGENTS.md` at the root of the repository:
 
 ```markdown
-# AGENTS.md — OpenCode Engineering & Security Charter for Janus-Auth
+# AGENTS.md — Engineering & Security Charter for Janus-Auth
 
 ## 1. Global Skill Rule
 Use the selected Hallmark skills automatically whenever a task matches what a skill does (for example UI design, documents, security review, testing).
@@ -1100,7 +1100,7 @@ You are building **Janus-Auth**, an SMT-Guided Counterfactual Differential Compi
 
 ---
 
-# 18. OpenCode Prompts (Kickoff, Per-Phase, Review, Troubleshooting)
+# 18. Build Prompts (Kickoff, Per-Phase, Review, Troubleshooting)
 
 ## 18.1 Master Kickoff Prompt
 

@@ -59,6 +59,12 @@ dev = [
 [project.scripts]
 janus-auth = "janus_auth.cli:app"
 
+[project.urls]
+Homepage = "https://github.com/jaaneeshwaran/janus-auth"
+Repository = "https://github.com/jaaneeshwaran/janus-auth"
+Issues = "https://github.com/jaaneeshwaran/janus-auth/issues"
+Documentation = "https://github.com/jaaneeshwaran/janus-auth/tree/main/docs"
+
 [tool.setuptools]
 package-dir = { "" = "src" }
 

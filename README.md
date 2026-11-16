@@ -11,6 +11,7 @@
 
 <p align="center">
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white" alt="Python 3.12+"></a>
+  <a href="https://github.com/jaaneeshwaran/janus-auth/actions/workflows/ci.yml"><img src="https://github.com/jaaneeshwaran/janus-auth/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://docs.astral.sh/ruff/"><img src="https://img.shields.io/badge/ruff-clean-2ea44f" alt="ruff clean"></a>
   <a href="https://mypy-lang.org/"><img src="https://img.shields.io/badge/mypy-clean-2ea44f" alt="mypy clean"></a>
   <img src="https://img.shields.io/badge/tests-265%20passing-2ea44f" alt="265 tests passing">
